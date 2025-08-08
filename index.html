@@ -44,21 +44,15 @@
       const baseComponentData = {
         controlPlane: {
           name: 'Control Plane Nodes',
-          profiles: {
-            default: { name: 'Default', cpu: 8, ram: 32, storage: 200, storageNote: "High-speed storage (SSD/NVMe) is strongly recommended for etcd performance." },
-          },
+          defaultConfig: { id: 1, cpu: 8, ram: 32, storage: 200 },
         },
         gpuWorkerNodes: {
           name: 'GPU-Enabled Worker Nodes',
-          profiles: {
-            default: { name: 'Default GPU Profile', cpu: 16, ram: 32, storage: 250 },
-          },
+          defaultConfig: { id: 1, cpu: 16, ram: 32, storage: 250, gpus: 1 },
         },
         generalWorkerNodes: {
           name: 'General Purpose Worker Nodes',
-          profiles: {
-            default: { name: 'Default General Profile', cpu: 8, ram: 64, storage: 100 },
-          },
+          defaultConfig: { id: 1, cpu: 8, ram: 64, storage: 100 },
         },
       };
 
@@ -117,14 +111,17 @@
           icon: <Globe className="w-5 h-5 mr-2" />,
           description: "An advanced, topology-aware observability platform based on StackState. It provides deep insights into the health and dependencies of your entire IT landscape.",
           profiles: {
-            '10_non_ha': { name: 'Up to 10 nodes (non-HA)', cpu: 4, ram: 16, storage: 50 },
-            '10_ha': { name: 'Up to 10 nodes (HA)', cpu: 4, ram: 16, storage: 50 },
-            '20_non_ha': { name: 'Up to 20 nodes (non-HA)', cpu: 8, ram: 32, storage: 100 },
-            '20_ha': { name: 'Up to 20 nodes (HA)', cpu: 8, ram: 32, storage: 100 },
-            '50_non_ha': { name: 'Up to 50 nodes (non-HA)', cpu: 16, ram: 64, storage: 200 },
-            '50_ha': { name: 'Up to 50 nodes (HA)', cpu: 16, ram: 64, storage: 200 },
-            '100_non_ha': { name: 'Up to 100 nodes (non-HA)', cpu: 32, ram: 128, storage: 500 },
-            '100_ha': { name: 'Up to 100 nodes (HA)', cpu: 32, ram: 128, storage: 500 },
+            'trial': { name: 'Trial (non-HA)', cpu: 4, ram: 8, storage: 50 },
+            '10-nonha': { name: '10 Nodes (non-HA)', cpu: 4, ram: 16, storage: 50 },
+            '20-nonha': { name: '20 Nodes (non-HA)', cpu: 8, ram: 32, storage: 100 },
+            '50-nonha': { name: '50 Nodes (non-HA)', cpu: 16, ram: 64, storage: 200 },
+            '100-nonha': { name: '100 Nodes (non-HA)', cpu: 32, ram: 128, storage: 500 },
+            '150-ha': { name: '150 Nodes (HA)', cpu: 16, ram: 32, storage: 100 },
+            '250-ha': { name: '250 Nodes (HA)', cpu: 24, ram: 48, storage: 150 },
+            '500-ha': { name: '500 Nodes (HA)', cpu: 32, ram: 64, storage: 200 },
+            '1000-ha': { name: '1000 Nodes (HA)', cpu: 48, ram: 96, storage: 300 },
+            '2000-ha': { name: '2000 Nodes (HA)', cpu: 64, ram: 128, storage: 500 },
+            '4000-ha': { name: '4000 Nodes (HA)', cpu: 96, ram: 192, storage: 750 },
           },
         },
       };
@@ -247,9 +244,17 @@
         const [activeTab, setActiveTab] = React.useState('sizing');
         
         const [baseSelections, setBaseSelections] = React.useState({
-          controlPlane: { profile: 'default', nodes: 3 },
-          gpuWorkerNodes: { profile: 'default', nodes: 1, gpusPerNode: 1 },
-          generalWorkerNodes: { profile: 'default', nodes: 1 },
+          controlPlane: { 
+            nodes: 3,
+            specifyCustom: false,
+            configurations: Array.from({ length: 3 }, (_, i) => ({ ...baseComponentData.controlPlane.defaultConfig, id: Date.now() + i }))
+          },
+          gpuWorkerNodes: { 
+            configurations: [{...baseComponentData.gpuWorkerNodes.defaultConfig, id: Date.now() + 10 }]
+          },
+          generalWorkerNodes: { 
+            configurations: [{...baseComponentData.generalWorkerNodes.defaultConfig, id: Date.now() + 11 }]
+          },
         });
 
         const [serviceSelections, setServiceSelections] = React.useState({
@@ -259,13 +264,13 @@
           milvus: { selected: false, profile: 'minimal' },
           ollama: { selected: false, profile: 'default' },
           openWebUI: { selected: false, profile: 'default' },
-          observability: { selected: false, profile: '20_ha' },
+          observability: { selected: false, profile: '150-ha' },
         });
         
         const [customApps, setCustomApps] = React.useState([]);
 
         const addCustomApp = () => {
-          setCustomApps(prev => [...prev, { id: Date.now(), name: 'Custom App', cpu: 2, ram: 4, storage: 20 }]);
+          setCustomApps(prev => [...prev, { id: Date.now(), name: 'Custom App', cpu: 2, ram: 4, storage: 20, gpus: 0 }]);
         };
 
         const updateCustomApp = (id, field, value) => {
@@ -277,7 +282,78 @@
         };
 
         const handleBaseChange = (id, field, value) => {
-          setBaseSelections(prev => ({ ...prev, [id]: { ...prev[id], [field]: value } }));
+            if (id === 'controlPlane' && field === 'nodes') {
+                const newSize = parseInt(value, 10) || 1;
+                setBaseSelections(prev => {
+                    const currentConfigs = prev.controlPlane.configurations;
+                    const newConfigs = [...currentConfigs];
+                    if (newSize > currentConfigs.length) {
+                        for (let i = currentConfigs.length; i < newSize; i++) {
+                            newConfigs.push({ ...baseComponentData.controlPlane.defaultConfig, id: Date.now() + i });
+                        }
+                    } else if (newSize < currentConfigs.length) {
+                        newConfigs.length = newSize;
+                    }
+                    return { ...prev, controlPlane: { ...prev.controlPlane, nodes: newSize, configurations: newConfigs }};
+                });
+            } else if (id === 'controlPlane' && field === 'specifyCustom') {
+                 setBaseSelections(prev => ({ ...prev, controlPlane: { ...prev.controlPlane, specifyCustom: value }}));
+            }
+        };
+        
+        const handleControlPlaneNodeChange = (id, field, value) => {
+            setBaseSelections(prev => {
+                const newConfigs = prev.controlPlane.configurations.map(node => 
+                    node.id === id ? { ...node, [field]: parseInt(value, 10) || 0 } : node
+                );
+                return { ...prev, controlPlane: { ...prev.controlPlane, configurations: newConfigs }};
+            });
+        };
+        
+        const addGpuNode = () => {
+            setBaseSelections(prev => {
+                const newConfigs = [...prev.gpuWorkerNodes.configurations, {...baseComponentData.gpuWorkerNodes.defaultConfig, id: Date.now() }];
+                return { ...prev, gpuWorkerNodes: { ...prev.gpuWorkerNodes, configurations: newConfigs }};
+            });
+        };
+
+        const removeGpuNode = (id) => {
+            setBaseSelections(prev => {
+                const newConfigs = prev.gpuWorkerNodes.configurations.filter(node => node.id !== id);
+                return { ...prev, gpuWorkerNodes: { ...prev.gpuWorkerNodes, configurations: newConfigs }};
+            });
+        };
+        
+        const handleGpuNodeChange = (id, field, value) => {
+            setBaseSelections(prev => {
+                const newConfigs = prev.gpuWorkerNodes.configurations.map(node => 
+                    node.id === id ? { ...node, [field]: parseInt(value, 10) || 0 } : node
+                );
+                return { ...prev, gpuWorkerNodes: { ...prev.gpuWorkerNodes, configurations: newConfigs }};
+            });
+        };
+
+        const addGeneralNode = () => {
+            setBaseSelections(prev => {
+                const newConfigs = [...prev.generalWorkerNodes.configurations, {...baseComponentData.generalWorkerNodes.defaultConfig, id: Date.now() }];
+                return { ...prev, generalWorkerNodes: { ...prev.generalWorkerNodes, configurations: newConfigs }};
+            });
+        };
+
+        const removeGeneralNode = (id) => {
+            setBaseSelections(prev => {
+                const newConfigs = prev.generalWorkerNodes.configurations.filter(node => node.id !== id);
+                return { ...prev, generalWorkerNodes: { ...prev.generalWorkerNodes, configurations: newConfigs }};
+            });
+        };
+        
+        const handleGeneralNodeChange = (id, field, value) => {
+            setBaseSelections(prev => {
+                const newConfigs = prev.generalWorkerNodes.configurations.map(node => 
+                    node.id === id ? { ...node, [field]: parseInt(value, 10) || 0 } : node
+                );
+                return { ...prev, generalWorkerNodes: { ...prev.generalWorkerNodes, configurations: newConfigs }};
+            });
         };
 
         const handleServiceChange = (id, field, value) => {
@@ -289,24 +365,33 @@
           const servicesDemand = { cpu: 0, ram: 0, storage: 0, gpu: 0 };
 
           // Control Plane
-          const cpProfile = baseComponentData.controlPlane.profiles[baseSelections.controlPlane.profile];
-          baseCapacity.cpu += cpProfile.cpu * baseSelections.controlPlane.nodes;
-          baseCapacity.ram += cpProfile.ram * baseSelections.controlPlane.nodes;
-          baseCapacity.storage += cpProfile.storage * baseSelections.controlPlane.nodes;
+          if(baseSelections.controlPlane.specifyCustom){
+              baseSelections.controlPlane.configurations.forEach(node => {
+                  baseCapacity.cpu += node.cpu;
+                  baseCapacity.ram += node.ram;
+                  baseCapacity.storage += node.storage;
+              });
+          } else {
+              const cpDefault = baseComponentData.controlPlane.defaultConfig;
+              baseCapacity.cpu += cpDefault.cpu * baseSelections.controlPlane.nodes;
+              baseCapacity.ram += cpDefault.ram * baseSelections.controlPlane.nodes;
+              baseCapacity.storage += cpDefault.storage * baseSelections.controlPlane.nodes;
+          }
           
           // GPU Workers
-          const gpuWn = baseSelections.gpuWorkerNodes;
-          const gpuWnProfile = baseComponentData.gpuWorkerNodes.profiles[gpuWn.profile];
-          baseCapacity.cpu += gpuWnProfile.cpu * gpuWn.nodes;
-          baseCapacity.ram += gpuWnProfile.ram * gpuWn.nodes;
-          baseCapacity.storage += gpuWnProfile.storage * gpuWn.nodes;
-          baseCapacity.gpu = (gpuWn.gpusPerNode || 0) * (gpuWn.nodes || 0);
-
+          baseSelections.gpuWorkerNodes.configurations.forEach(node => {
+              baseCapacity.cpu += node.cpu;
+              baseCapacity.ram += node.ram;
+              baseCapacity.storage += node.storage;
+              baseCapacity.gpu += node.gpus;
+          });
+          
           // General Workers
-          const genWnProfile = baseComponentData.generalWorkerNodes.profiles[baseSelections.generalWorkerNodes.profile];
-          baseCapacity.cpu += genWnProfile.cpu * baseSelections.generalWorkerNodes.nodes;
-          baseCapacity.ram += genWnProfile.ram * baseSelections.generalWorkerNodes.nodes;
-          baseCapacity.storage += genWnProfile.storage * baseSelections.generalWorkerNodes.nodes;
+          baseSelections.generalWorkerNodes.configurations.forEach(node => {
+              baseCapacity.cpu += node.cpu;
+              baseCapacity.ram += node.ram;
+              baseCapacity.storage += node.storage;
+          });
 
           // Pre-defined Services
           const selectedServicesDetails = [];
@@ -330,6 +415,7 @@
               servicesDemand.cpu += Number(app.cpu) || 0;
               servicesDemand.ram += Number(app.ram) || 0;
               servicesDemand.storage += Number(app.storage) || 0;
+              servicesDemand.gpu += Number(app.gpus) || 0;
           });
           
           const deltas = {
@@ -379,7 +465,7 @@
               </div>
 
               <main className="bg-white p-6 rounded-xl shadow-lg">
-                {activeTab === 'sizing' && <SizingTab baseSelections={baseSelections} serviceSelections={serviceSelections} onBaseChange={handleBaseChange} onServiceChange={handleServiceChange} summary={summary} customApps={customApps} addCustomApp={addCustomApp} updateCustomApp={updateCustomApp} removeCustomApp={removeCustomApp} />}
+                {activeTab === 'sizing' && <SizingTab baseSelections={baseSelections} serviceSelections={serviceSelections} onBaseChange={handleBaseChange} onControlPlaneNodeChange={handleControlPlaneNodeChange} onGpuNodeChange={handleGpuNodeChange} addGpuNode={addGpuNode} removeGpuNode={removeGpuNode} onGeneralNodeChange={handleGeneralNodeChange} addGeneralNode={addGeneralNode} removeGeneralNode={removeGeneralNode} onServiceChange={handleServiceChange} summary={summary} customApps={customApps} addCustomApp={addCustomApp} updateCustomApp={updateCustomApp} removeCustomApp={removeCustomApp} />}
                 {activeTab === 'diagram' && <ArchitectureDiagramTab baseSelections={baseSelections} serviceSelections={serviceSelections} customApps={customApps} gpuDemand={summary.servicesDemand.gpu}/>}
                 {activeTab === 'network' && <NetworkTab activeRules={activeNetworkRules} />}
                 {activeTab === 'summary' && <SummaryTab summary={summary} />}
@@ -402,7 +488,7 @@
       }
 
       // --- Sizing Tab ---
-      const SizingTab = ({ baseSelections, serviceSelections, onBaseChange, onServiceChange, summary, customApps, addCustomApp, updateCustomApp, removeCustomApp }) => {
+      const SizingTab = ({ baseSelections, serviceSelections, onBaseChange, onControlPlaneNodeChange, onGpuNodeChange, addGpuNode, removeGpuNode, onGeneralNodeChange, addGeneralNode, removeGeneralNode, onServiceChange, summary, customApps, addCustomApp, updateCustomApp, removeCustomApp }) => {
           const gpuDemand = summary.servicesDemand.gpu;
           const gpuDelta = summary.deltas.gpu;
 
@@ -415,9 +501,9 @@
               <section>
                 <h2 className="text-2xl font-semibold mb-4 text-gray-700">Base Cluster Configuration</h2>
                 <div className="space-y-6">
-                  <BaseNodeCard id="controlPlane" data={baseComponentData.controlPlane} selection={baseSelections.controlPlane} onChange={onBaseChange} />
-                  <BaseNodeCard id="gpuWorkerNodes" data={baseComponentData.gpuWorkerNodes} selection={baseSelections.gpuWorkerNodes} onChange={onBaseChange} gpuDemand={gpuDemand} gpuDelta={gpuDelta} />
-                  <BaseNodeCard id="generalWorkerNodes" data={baseComponentData.generalWorkerNodes} selection={baseSelections.generalWorkerNodes} onChange={onBaseChange} />
+                  <BaseNodeCard id="controlPlane" data={baseComponentData.controlPlane} selection={baseSelections.controlPlane} onChange={onBaseChange} onNodeChange={onControlPlaneNodeChange} />
+                  <BaseNodeCard id="gpuWorkerNodes" data={baseComponentData.gpuWorkerNodes} selection={baseSelections.gpuWorkerNodes} onNodeChange={onGpuNodeChange} addNode={addGpuNode} removeNode={removeGpuNode} gpuDemand={gpuDemand} gpuDelta={gpuDelta} />
+                  <BaseNodeCard id="generalWorkerNodes" data={baseComponentData.generalWorkerNodes} selection={baseSelections.generalWorkerNodes} onNodeChange={onGeneralNodeChange} addNode={addGeneralNode} removeNode={removeGeneralNode} />
                 </div>
               </section>
               <section>
@@ -453,33 +539,79 @@
           );
       }
 
-      const BaseNodeCard = ({ id, data, selection, onChange, gpuDemand, gpuDelta }) => {
-          const profile = data.profiles[selection.profile];
+      const BaseNodeCard = ({ id, data, selection, onChange, onNodeChange, addNode, removeNode, gpuDemand, gpuDelta }) => {
+          const profile = data.profiles ? data.profiles[selection.profile] : null;
           return (
               <div className="border rounded-lg p-5 bg-gray-50 border-gray-200 space-y-4">
                   <h3 className="text-xl font-bold text-gray-800">{data.name}</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {Object.keys(data.profiles).length > 1 && (
-                          <div>
-                              <label className="block text-sm font-medium text-gray-600 mb-1">Sizing Profile</label>
-                              <select value={selection.profile} onChange={(e) => onChange(id, 'profile', e.target.value)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-emerald-500 focus:border-emerald-500">
-                                  {Object.entries(data.profiles).map(([pId, pData]) => <option key={pId} value={pId}>{pData.name}</option>)}
-                              </select>
+                  {id === 'controlPlane' && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
+                        <div>
+                            <label className="block text-sm font-medium text-gray-600 mb-1">Number of Nodes</label>
+                            <input type="number" min="1" value={selection.nodes} onChange={(e) => onChange(id, 'nodes', parseInt(e.target.value, 10) || 1)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-emerald-500 focus:border-emerald-500" />
+                        </div>
+                        <div className="flex items-center mt-6">
+                            <input type="checkbox" id="specify-cp-res" checked={selection.specifyCustom} onChange={(e) => onChange(id, 'specifyCustom', e.target.checked)} className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500" />
+                            <label htmlFor="specify-cp-res" className="ml-2 block text-sm text-gray-900">Specify resources</label>
+                        </div>
+                    </div>
+                  )}
+                  
+                  {id === 'controlPlane' && !selection.specifyCustom && (
+                    <div className="p-3 bg-blue-100 rounded-md text-blue-900">
+                        <h4 className="font-semibold mb-2">Resources (per node)</h4>
+                        <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm">
+                            <div className="flex items-center"><Cpu size={16} className="mr-2"/>{data.defaultConfig.cpu} vCPUs</div>
+                            <div className="flex items-center"><MemoryStick size={16} className="mr-2"/>{data.defaultConfig.ram} GB RAM</div>
+                            <div className="flex items-center"><HardDrive size={16} className="mr-2"/>{data.defaultConfig.storage} GB Storage</div>
+                        </div>
+                    </div>
+                  )}
+
+                  {(id === 'generalWorkerNodes' || id === 'gpuWorkerNodes' || (id === 'controlPlane' && selection.specifyCustom)) && (
+                    <div>
+                        {selection.configurations.map((node, index) => (
+                          <div key={node.id} className="p-4 border-t border-gray-300 mt-4">
+                              <div className="flex justify-between items-center mb-3">
+                                <h4 className="font-semibold text-gray-700">Node {index + 1} Configuration</h4>
+                                {id !== 'controlPlane' && (
+                                    <button onClick={() => removeNode(node.id)} className="text-gray-400 hover:text-red-500">
+                                        <XCircle size={20} />
+                                    </button>
+                                )}
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                                  <div>
+                                      <label className="block text-sm font-medium text-gray-600 mb-1">vCPUs</label>
+                                      <input type="number" min="0" value={node.cpu} onChange={(e) => onNodeChange(node.id, 'cpu', e.target.value)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm" />
+                                  </div>
+                                  <div>
+                                      <label className="block text-sm font-medium text-gray-600 mb-1">RAM (GB)</label>
+                                      <input type="number" min="0" value={node.ram} onChange={(e) => onNodeChange(node.id, 'ram', e.target.value)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm" />
+                                  </div>
+                                  <div>
+                                      <label className="block text-sm font-medium text-gray-600 mb-1">Storage (GB)</label>
+                                      <input type="number" min="0" value={node.storage} onChange={(e) => onNodeChange(node.id, 'storage', e.target.value)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm" />
+                                  </div>
+                                  {id === 'gpuWorkerNodes' && (
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-600 mb-1">GPUs</label>
+                                        <input type="number" min="0" value={node.gpus} onChange={(e) => onNodeChange(node.id, 'gpus', e.target.value)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm" />
+                                    </div>
+                                  )}
+                              </div>
                           </div>
-                      )}
-                      <div>
-                          <label className="block text-sm font-medium text-gray-600 mb-1">Number of Nodes</label>
-                          <input type="number" min="1" value={selection.nodes} onChange={(e) => onChange(id, 'nodes', parseInt(e.target.value, 10) || 1)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-emerald-500 focus:border-emerald-500" />
-                      </div>
-                  </div>
-                  <div className="p-3 bg-blue-100 rounded-md text-blue-900">
-                      <h4 className="font-semibold mb-2">Resources (per node)</h4>
-                      <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm">
-                          <div className="flex items-center"><Cpu size={16} className="mr-2"/>{profile.cpu} vCPUs</div>
-                          <div className="flex items-center"><MemoryStick size={16} className="mr-2"/>{profile.ram} GB RAM</div>
-                          <div className="flex items-center"><HardDrive size={16} className="mr-2"/>{profile.storage} GB Storage</div>
-                      </div>
-                  </div>
+                        ))}
+                        {id !== 'controlPlane' && (
+                            <div className="mt-4">
+                                <button onClick={addNode} className="flex items-center gap-2 px-4 py-2 bg-gray-200 text-gray-700 font-semibold rounded-lg hover:bg-gray-300 transition-colors">
+                                    <PlusCircle size={20} />
+                                    Add {id === 'gpuWorkerNodes' ? 'GPU' : 'GP'} Node
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                  )}
                   {id === 'controlPlane' && (
                       <>
                       <div className="p-3 bg-sky-100 text-sky-900 rounded-md flex items-start text-sm">
@@ -495,17 +627,6 @@
                       </>
                   )}
                   {id === 'gpuWorkerNodes' && (
-                      <>
-                      <div>
-                          <label className="block text-sm font-medium text-gray-600 mb-1">GPUs per Node</label>
-                          <input type="number" min="0" value={selection.gpusPerNode} onChange={(e) => onChange(id, 'gpusPerNode', parseInt(e.target.value, 10) || 0)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-emerald-500 focus:border-emerald-500" />
-                      </div>
-                      <div className="p-3 bg-blue-100 rounded-md text-blue-900">
-                          <h4 className="font-semibold mb-2">Total GPUs in Cluster</h4>
-                          <div className="flex items-center text-sm font-semibold">
-                              <Layers size={16} className="mr-2"/> {(selection.gpusPerNode || 0) * (selection.nodes || 0)} Total GPUs
-                          </div>
-                      </div>
                       <div className={`p-3 rounded-md flex items-center text-sm ${gpuDelta >= 0 ? 'bg-emerald-100 text-emerald-900' : 'bg-amber-100 text-amber-900'}`}>
                           {gpuDelta >= 0 ? <CheckCircle size={20} className="mr-3 flex-shrink-0 text-emerald-500"/> : <AlertTriangle size={20} className="mr-3 flex-shrink-0 text-amber-500"/>}
                           <div>
@@ -513,7 +634,6 @@
                               {gpuDelta < 0 && ` You have a deficit of ${Math.abs(gpuDelta)} GPU(s).`}
                           </div>
                       </div>
-                      </>
                   )}
               </div>
           );
@@ -572,17 +692,23 @@
               </button>
             </div>
             <div className="space-y-2">
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-1">vCPUs</label>
-                <input type="number" min="0" value={app.cpu} onChange={(e) => onUpdate(app.id, 'cpu', e.target.value)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-1">Memory (GB)</label>
-                <input type="number" min="0" value={app.ram} onChange={(e) => onUpdate(app.id, 'ram', e.target.value)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-1">Storage (GB)</label>
-                <input type="number" min="0" value={app.storage} onChange={(e) => onUpdate(app.id, 'storage', e.target.value)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500" />
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div>
+                      <label className="block text-sm font-medium text-gray-600 mb-1">vCPUs</label>
+                      <input type="number" min="0" value={app.cpu} onChange={(e) => onUpdate(app.id, 'cpu', e.target.value)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm" />
+                  </div>
+                  <div>
+                      <label className="block text-sm font-medium text-gray-600 mb-1">RAM (GB)</label>
+                      <input type="number" min="0" value={app.ram} onChange={(e) => onUpdate(app.id, 'ram', e.target.value)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm" />
+                  </div>
+                  <div>
+                      <label className="block text-sm font-medium text-gray-600 mb-1">Storage (GB)</label>
+                      <input type="number" min="0" value={app.storage} onChange={(e) => onUpdate(app.id, 'storage', e.target.value)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm" />
+                  </div>
+                  <div>
+                      <label className="block text-sm font-medium text-gray-600 mb-1">GPUs</label>
+                      <input type="number" min="0" value={app.gpus} onChange={(e) => onUpdate(app.id, 'gpus', e.target.value)} className="w-full p-2 border border-gray-300 rounded-md shadow-sm" />
+                  </div>
               </div>
             </div>
           </div>
@@ -591,24 +717,32 @@
 
       // --- Architecture Diagram Tab ---
       const ArchitectureDiagramTab = ({ baseSelections, serviceSelections, customApps, gpuDemand }) => {
-          const cpProfile = baseComponentData.controlPlane.profiles[baseSelections.controlPlane.profile];
-          const gpuWnProfile = baseComponentData.gpuWorkerNodes.profiles[baseSelections.gpuWorkerNodes.profile];
-          const genWnProfile = baseComponentData.generalWorkerNodes.profiles[baseSelections.generalWorkerNodes.profile];
-          
-          const cpNodes = Array.from({ length: baseSelections.controlPlane.nodes }, (_, i) => i);
-          const gpuWnNodes = Array.from({ length: baseSelections.gpuWorkerNodes.nodes }, (_, i) => i);
-          const genWnNodes = Array.from({ length: baseSelections.generalWorkerNodes.nodes }, (_, i) => i);
+          const cpNodes = baseSelections.controlPlane.specifyCustom 
+            ? baseSelections.controlPlane.configurations 
+            : Array.from({ length: baseSelections.controlPlane.nodes }, (_, i) => ({ ...baseComponentData.controlPlane.defaultConfig, id: i }));
 
           const selectedServices = Object.entries(serviceSelections)
               .filter(([, config]) => config.selected)
-              .map(([id]) => servicesData[id]);
+              .map(([id, config]) => {
+                  const serviceInfo = servicesData[id];
+                  const profileInfo = serviceInfo.profiles[config.profile];
+                  return {
+                      id: id,
+                      name: serviceInfo.name,
+                      icon: serviceInfo.icon,
+                      cpu: profileInfo.cpu,
+                      ram: profileInfo.ram,
+                      storage: profileInfo.storage,
+                      gpus: profileInfo.gpu || 0
+                  };
+              });
 
-          const allServices = [
+          const allWorkloads = [
               ...selectedServices,
               ...customApps.map(app => ({...app, icon: <Server className="w-5 h-5 mr-2" />}))
           ];
               
-          const totalGpus = (baseSelections.gpuWorkerNodes.gpusPerNode || 0) * (baseSelections.gpuWorkerNodes.nodes || 0);
+          const totalGpus = baseSelections.gpuWorkerNodes.configurations.reduce((sum, node) => sum + (node.gpus || 0), 0);
           const availableGpus = totalGpus - gpuDemand;
 
           return (
@@ -618,8 +752,8 @@
                   <div className="mb-8">
                       <h3 className="text-xl font-bold text-center text-gray-600 mb-4">Control Plane</h3>
                       <div className="flex justify-center flex-wrap gap-6">
-                          {cpNodes.map(i => (
-                              <NodeCard key={`cp-${i}`} title={`Control Plane Node ${i + 1}`} profile={cpProfile} />
+                          {cpNodes.map((node, i) => (
+                              <NodeCard key={node.id} title={`Control Plane Node ${i + 1}`} profile={node} />
                           ))}
                       </div>
                   </div>
@@ -635,14 +769,22 @@
                             <span className="bg-slate-100 px-4 font-bold text-emerald-600">WORKER NODES & SERVICES</span>
                           </div>
                           <div className="relative border-2 border-dashed border-emerald-500 rounded-xl p-8 pt-12 bg-white space-y-8">
-                              {allServices.length > 0 && (
+                              {allWorkloads.length > 0 && (
                                   <div className="p-4 bg-emerald-50 rounded-lg">
                                       <h4 className="text-lg font-semibold text-center text-emerald-800 mb-3">Additional Services & Workloads</h4>
                                       <div className="flex justify-center flex-wrap gap-4 text-emerald-900">
-                                          {allServices.map(s => (
-                                              <div key={s.id || s.name} className="inline-block bg-emerald-200 rounded-full px-3 py-1 text-sm">
-                                                  {React.cloneElement(s.icon, { className: "inline-block align-middle" })}
-                                                  <span className="inline-block align-middle">{s.name}</span>
+                                          {allWorkloads.map(s => (
+                                              <div key={s.id || s.name} className="bg-emerald-200 rounded-lg p-3 text-sm flex flex-col items-center shadow">
+                                                  <div className="flex items-center font-bold mb-2">
+                                                      {s.icon}
+                                                      <span>{s.name}</span>
+                                                  </div>
+                                                  <div className="text-xs space-y-1 text-emerald-800 text-left">
+                                                      <div className="flex items-center"><Cpu size={12} className="mr-1.5"/>{s.cpu} vCPUs</div>
+                                                      <div className="flex items-center"><MemoryStick size={12} className="mr-1.5"/>{s.ram} GB RAM</div>
+                                                      <div className="flex items-center"><HardDrive size={12} className="mr-1.5"/>{s.storage} GB Storage</div>
+                                                      {s.gpus > 0 && <div className="flex items-center"><Layers size={12} className="mr-1.5"/>{s.gpus} GPU(s)</div>}
+                                                  </div>
                                               </div>
                                           ))}
                                       </div>
@@ -672,16 +814,16 @@
                                           </div>
                                       </div>
                                       <div className="flex justify-center flex-wrap gap-6">
-                                          {gpuWnNodes.map(i => (
-                                              <NodeCard key={`gpu-wn-${i}`} title={`GPU Worker ${i + 1}`} profile={gpuWnProfile} gpus={baseSelections.gpuWorkerNodes.gpusPerNode} />
+                                          {baseSelections.gpuWorkerNodes.configurations.map((node, i) => (
+                                              <NodeCard key={node.id} title={`GPU Worker ${i + 1}`} profile={node} gpus={node.gpus} />
                                           ))}
                                       </div>
                                   </div>
                                   <div className="space-y-4">
                                       <h4 className="text-lg font-semibold text-center text-slate-700">General Purpose Workers</h4>
                                       <div className="flex justify-center flex-wrap gap-6">
-                                          {genWnNodes.map(i => (
-                                              <NodeCard key={`gen-wn-${i}`} title={`GP Worker ${i + 1}`} profile={genWnProfile} />
+                                          {baseSelections.generalWorkerNodes.configurations.map((node, i) => (
+                                              <NodeCard key={node.id} title={`GP Worker ${i + 1}`} profile={node} />
                                           ))}
                                       </div>
                                   </div>
