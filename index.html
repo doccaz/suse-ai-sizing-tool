@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.3.0";
+      const APP_VERSION = "2.3.1";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -990,9 +990,9 @@
               </div>
             </main>
 
-            {/* Hidden render targets for PDF capture */}
+            {/* Hidden render target for PDF capture — only the architecture diagram is
+                rasterized; the rest of the report is drawn as vector text/tables. */}
             <div className="fixed -left-[9999px] top-0" aria-hidden="true">
-              <div id="pdf-summary" style={{ width: 760, background: '#ffffff', padding: 24, color: '#0C322C' }}><PdfSummary summary={fleet} /></div>
               <div id="pdf-diagram" style={{ width: 1100, background: '#ffffff', padding: 24 }}><DiagramTab state={state} summary={fleet} virtSummary={virtSummary} forPdf /></div>
             </div>
 
@@ -1659,8 +1659,8 @@
 
         return (
           <div className={`space-y-6 ${forPdf ? '' : 'bg-suse-panel border border-suse-border rounded-xl p-6'}`}>
-            <h2 className={`text-xl font-bold text-center ${textMain}`}>Proposed Architecture</h2>
-            <p className={`text-xs text-center -mt-3 ${textSub}`}>{clusters.length} cluster{clusters.length !== 1 ? 's' : ''} · {summary.capacity.cpu} vCPU · {summary.capacity.ram} GB RAM · {summary.capacity.gpu} GPU (fleet)</p>
+            {!forPdf && <h2 className={`text-xl font-bold text-center ${textMain}`}>Proposed Architecture</h2>}
+            <p className={`text-xs text-center ${forPdf ? '' : '-mt-3'} ${textSub}`}>{clusters.length} cluster{clusters.length !== 1 ? 's' : ''} · {summary.capacity.cpu} vCPU · {summary.capacity.ram} GB RAM · {summary.capacity.gpu} GPU (fleet)</p>
 
             <div className="space-y-6">
               {clusters.map(c => <ClusterArchitecture key={c.id} cluster={c} forPdf={forPdf} textMain={textMain} textSub={textSub} />)}
@@ -1850,27 +1850,6 @@
         );
       };
 
-      /* PDF-only light summary block */
-      const PdfSummary = ({ summary }) => {
-        const block = (title, d, delta) => (
-          <div style={{ border: '1px solid #1A453C', borderRadius: 8, padding: 14, marginBottom: 12 }}>
-            <div style={{ fontWeight: 700, marginBottom: 8, color: '#0C322C' }}>{title}</div>
-            <div style={{ display: 'flex', gap: 24, fontFamily: 'monospace' }}>
-              <span>vCPU: <b>{delta && d.cpu>=0?`+${d.cpu}`:d.cpu}</b></span>
-              <span>RAM: <b>{delta && d.ram>=0?`+${d.ram}`:d.ram} GB</b></span>
-              <span>Storage: <b>{delta && d.storage>=0?`+${d.storage}`:d.storage} GB</b></span>
-              <span>GPU: <b>{delta && d.gpu>=0?`+${d.gpu}`:d.gpu}</b></span>
-            </div>
-          </div>
-        );
-        return (
-          <div style={{ fontFamily: 'Inter, sans-serif' }}>
-            {block('Total Fleet Capacity', summary.capacity)}
-            {block('Services & Apps Demand', summary.demand)}
-            {block('Remaining Headroom / Deficit', summary.deltas, true)}
-          </div>
-        );
-      };
 
       /* =====================================================================
          HOW TO + ABOUT
@@ -2384,122 +2363,131 @@
       async function generatePdfReport(summary, networkRules, virt, virtCfg) {
         const { jsPDF } = window.jspdf;
         const doc = new jsPDF('p', 'mm', 'a4');
-        const pageW = doc.internal.pageSize.getWidth();
         const margin = 15;
+        const CONTENT_TOP = 26;          // first content baseline, clear of the header
+        const CONTENT_BOTTOM = 16;       // gap reserved for the footer
 
-        // Logo (rasterized from SVG ourselves for a crisp, reliable mark)
-        const logoH = 22; // mm
-        try {
-          const { dataUrl, ratio } = await svgToPng('assets/suse-ai-pos-green-stacked.svg', 320);
-          const logoW = logoH * ratio;
-          doc.addImage(dataUrl, 'PNG', (pageW - logoW) / 2, 10, logoW, logoH);
-        } catch (e) { /* logo is decorative — continue without it */ }
-
-        doc.setFontSize(20); doc.setTextColor('#0C322C');
-        doc.text("SUSE AI Sizing Report", pageW / 2, 42, { align: 'center' });
-        doc.setFontSize(9); doc.setTextColor('#6b7280');
-        doc.text(new Date().toLocaleString('en-US'), pageW / 2, 48, { align: 'center' });
-
-        // Summary image
-        const summaryEl = document.getElementById('pdf-summary');
-        const sCanvas = await html2canvas(summaryEl, { scale: 2, backgroundColor: '#ffffff' });
-        const sImg = sCanvas.toDataURL('image/png');
-        const sProps = doc.getImageProperties(sImg);
-        const sW = pageW - margin * 2;
-        const sH = (sProps.height * sW) / sProps.width;
-        doc.addImage(sImg, 'PNG', margin, 54, sW, sH);
-
-        // Per-cluster fleet breakdown table
-        let clusterY = 54 + sH + 8;
-        if (clusterY > doc.internal.pageSize.getHeight() - 45) { doc.addPage('a4', 'p'); clusterY = 20; }
-        doc.setFontSize(12); doc.setTextColor('#0C322C');
-        doc.text("Cluster Fleet", margin, clusterY);
+        // Single design system: one font (Helvetica, jsPDF default), one palette.
+        const GREEN = [48, 186, 120], DARK = [12, 50, 44];
+        const INK = '#0C322C', MUTE = '#6b7280', RULE = '#d1d5db';
+        const dateStr = new Date().toLocaleString('en-US');
+        const pageW = () => doc.internal.pageSize.getWidth();
+        const pageH = () => doc.internal.pageSize.getHeight();
+        const fmt = (n) => Number(n).toLocaleString('en-US');
+        const signed = (n) => (n >= 0 ? `+${fmt(n)}` : fmt(n));
         const roleLabel = (r) => (CLUSTER_ROLE[r] || CLUSTER_ROLE.workload).label;
-        doc.autoTable({
-          startY: clusterY + 3, theme: 'grid',
-          headStyles: { fillColor: [48, 186, 120] }, styles: { fontSize: 8 },
-          margin: { left: margin, right: margin },
+
+        // Logo, rasterized once from SVG; reused on every page header.
+        let logo = null;
+        try { logo = await svgToPng('assets/suse-ai-pos-green-stacked.svg', 320); } catch (e) { /* decorative */ }
+
+        // Shared section heading + table defaults so every page matches.
+        const sectionTitle = (text, y) => {
+          doc.setFont('helvetica', 'bold'); doc.setFontSize(14); doc.setTextColor(INK);
+          doc.text(text, margin, y);
+          return y + 6;
+        };
+        const table = (opts) => {
+          doc.autoTable(Object.assign({
+            theme: 'grid',
+            headStyles: { fillColor: GREEN, textColor: 255, fontStyle: 'bold' },
+            styles: { font: 'helvetica', fontSize: 8, cellPadding: 1.6 },
+            margin: { left: margin, right: margin, top: CONTENT_TOP, bottom: CONTENT_BOTTOM },
+          }, opts));
+          return doc.lastAutoTable.finalY;
+        };
+
+        /* ---- Page 1: Fleet summary + cluster breakdown ---- */
+        let y = sectionTitle('Fleet Summary', CONTENT_TOP);
+        y = table({
+          startY: y,
+          head: [['Resource', 'Capacity', 'Demand', 'Headroom']],
+          body: [
+            ['vCPU',         fmt(summary.capacity.cpu),     fmt(summary.demand.cpu),     signed(summary.deltas.cpu)],
+            ['RAM (GB)',     fmt(summary.capacity.ram),     fmt(summary.demand.ram),     signed(summary.deltas.ram)],
+            ['Storage (GB)', fmt(summary.capacity.storage), fmt(summary.demand.storage), signed(summary.deltas.storage)],
+            ['GPU',          fmt(summary.capacity.gpu),     fmt(summary.demand.gpu),     signed(summary.deltas.gpu)],
+          ],
+          columnStyles: { 0: { fontStyle: 'bold' } },
+          didParseCell: (d) => {
+            if (d.section === 'body' && d.column.index === 3) {
+              d.cell.styles.textColor = String(d.cell.raw).startsWith('-') ? [200, 40, 40] : [22, 140, 90];
+              d.cell.styles.fontStyle = 'bold';
+            }
+          },
+        }) + 10;
+
+        y = sectionTitle('Cluster Fleet', y);
+        table({
+          startY: y,
           head: [['Cluster', 'Role', 'CP', 'GPU wk', 'Gen wk', 'vCPU', 'RAM GB', 'Stor GB', 'GPU']],
           body: (summary.per || []).map(({ cluster, summary: cs }) => [
             cluster.name, roleLabel(cluster.role),
             cs.counts.controlPlane, cs.counts.gpuWorkerNodes, cs.counts.generalWorkerNodes,
-            cs.capacity.cpu, cs.capacity.ram, cs.capacity.storage, cs.capacity.gpu,
+            fmt(cs.capacity.cpu), fmt(cs.capacity.ram), fmt(cs.capacity.storage), cs.capacity.gpu,
           ]),
           foot: [['Fleet total', `${summary.clusterCount} cluster${summary.clusterCount !== 1 ? 's' : ''}`,
             summary.counts.controlPlane, summary.counts.gpuWorkerNodes, summary.counts.generalWorkerNodes,
-            summary.capacity.cpu, summary.capacity.ram, summary.capacity.storage, summary.capacity.gpu]],
-          footStyles: { fillColor: [12, 50, 44], textColor: 255, fontStyle: 'bold' },
+            fmt(summary.capacity.cpu), fmt(summary.capacity.ram), fmt(summary.capacity.storage), summary.capacity.gpu]],
+          footStyles: { fillColor: DARK, textColor: 255, fontStyle: 'bold' },
         });
 
-        // Diagram on its own (landscape) page
+        /* ---- Architecture diagram (the one intentionally-raster section) ---- */
         const diagramEl = document.getElementById('pdf-diagram');
         const dCanvas = await html2canvas(diagramEl, { scale: 2, backgroundColor: '#ffffff' });
         const dImg = dCanvas.toDataURL('image/png');
         const dProps = doc.getImageProperties(dImg);
         const landscape = dProps.width > dProps.height;
         doc.addPage('a4', landscape ? 'l' : 'p');
-        const pw = doc.internal.pageSize.getWidth(), ph = doc.internal.pageSize.getHeight();
-        doc.setFontSize(15); doc.setTextColor('#0C322C');
-        doc.text("Proposed Architecture", margin, 18);
-        const availW = pw - margin * 2, availH = ph - 28 - margin;
+        const yTitle = sectionTitle('Proposed Architecture', CONTENT_TOP);
+        const availW = pageW() - margin * 2, availH = pageH() - yTitle - CONTENT_BOTTOM;
         const ratio = dProps.width / dProps.height;
         let fw = availW, fh = fw / ratio;
         if (fh > availH) { fh = availH; fw = fh * ratio; }
-        doc.addImage(dImg, 'PNG', (pw - fw) / 2, 26, fw, fh);
+        doc.addImage(dImg, 'PNG', (pageW() - fw) / 2, yTitle, fw, fh);
 
-        // Network rules tables
+        /* ---- Network rules ---- */
         doc.addPage('a4', 'p');
-        let y = 20;
-        doc.setFontSize(15); doc.setTextColor('#0C322C');
-        doc.text("Network & Firewall Rules", margin, y); y += 6;
+        y = sectionTitle('Network & Firewall Rules', CONTENT_TOP);
         networkRules.forEach(rule => {
-          if (y + 30 > doc.internal.pageSize.getHeight()) { doc.addPage('a4', 'p'); y = 20; }
-          doc.setFontSize(12); doc.setTextColor('#0C322C');
-          doc.text(rule.name, margin, y + 6);
-          doc.autoTable({
-            startY: y + 9,
+          if (y + 24 > pageH() - CONTENT_BOTTOM) { doc.addPage('a4', 'p'); y = CONTENT_TOP; }
+          doc.setFont('helvetica', 'bold'); doc.setFontSize(10.5); doc.setTextColor(INK);
+          doc.text(rule.name, margin, y + 3);
+          y = table({
+            startY: y + 5,
             head: [['Port(s)', 'Service', 'Source', 'Destination']],
             body: rule.ports.map(p => [p.port, p.service, p.source, p.destination]),
-            theme: 'grid',
-            headStyles: { fillColor: [48, 186, 120] },
-            styles: { fontSize: 8 },
-            margin: { left: margin, right: margin },
-          });
-          y = doc.lastAutoTable.finalY + 10;
+          }) + 9;
         });
 
-        // Virtualization (bare-metal host) sizing
+        /* ---- Virtualization (bare-metal host) sizing ---- */
         if (virt && virt.agg && virt.agg.vms > 0) {
           doc.addPage('a4', 'p');
-          let vy = 20;
-          doc.setFontSize(15); doc.setTextColor('#0C322C');
-          doc.text("SUSE Virtualization (Bare-Metal) Sizing", margin, vy); vy += 6;
           const ext = virt.ext;
+          let vy = sectionTitle('SUSE Virtualization (Bare-Metal) Sizing', CONTENT_TOP);
+          doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(MUTE);
+          const intro = doc.splitTextToSize(`Mode: ${virt.mode === 'pool' ? 'Mixed inventory check' : 'Auto-size identical hosts'}  ·  Overcommit (non-GPU): ${virtCfg.overcommit.vcpu}× vCPU / ${virtCfg.overcommit.ram}× RAM  ·  GPU VMs pinned 1:1`, pageW() - margin * 2);
+          doc.text(intro, margin, vy); vy += intro.length * 4 + 3;
 
-          doc.setFontSize(9); doc.setTextColor('#6b7280');
-          doc.text(`Mode: ${virt.mode === 'pool' ? 'Mixed inventory check' : 'Auto-size identical hosts'}  ·  Overcommit (non-GPU): ${virtCfg.overcommit.vcpu}× vCPU / ${virtCfg.overcommit.ram}× RAM  ·  GPU VMs pinned 1:1`, margin, vy); vy += 6;
-
-          doc.autoTable({ startY: vy, theme: 'grid', headStyles: { fillColor: [48, 186, 120] }, styles: { fontSize: 8 }, margin: { left: margin, right: margin },
+          vy = table({ startY: vy,
             head: [['Host type', 'Qty', 'Sockets×cores×thr', 'Sched. threads', 'Usable RAM', 'Storage', 'GPU']],
             body: virtCfg.hosts.map(h => { const c = virt.hostCaps.find(x => x.id === h.id) || {}; return [
               h.name + (h.primary && virt.mode === 'auto' ? ' (block)' : ''),
               virt.mode === 'pool' ? String(h.count) : '—',
               `${h.sockets}×${h.coresPerSocket}×${h.threadsPerCore} = ${c.threads}`,
-              String(c.cpu), `${(c.ram || 0).toLocaleString('en-US')} GB`,
-              ext ? '—' : `${(h.storage || 0).toLocaleString('en-US')} GB`, String(h.gpus),
-            ]; }) });
-          vy = doc.lastAutoTable.finalY + 6;
+              String(c.cpu), `${fmt(c.ram || 0)} GB`,
+              ext ? '—' : `${fmt(h.storage || 0)} GB`, String(h.gpus),
+            ]; }) }) + 6;
 
-          doc.autoTable({ startY: vy, theme: 'grid', headStyles: { fillColor: [48, 186, 120] }, styles: { fontSize: 9 }, margin: { left: margin, right: margin },
+          vy = table({ startY: vy, styles: { font: 'helvetica', fontSize: 9, cellPadding: 1.6 },
             head: [['Aggregated VM fleet', 'Value']],
             body: [
               ['Total VMs', `${virt.agg.vms} (${virt.agg.gpuVms} GPU-pinned)`],
               ['Total vCPU', `${virt.agg.cpu} (~${Math.ceil(virt.demand.cpu)} physical threads, largest VM ${virt.agg.maxCpu})`],
-              ['Total RAM', `${virt.agg.ram.toLocaleString('en-US')} GB (~${Math.ceil(virt.demand.ram).toLocaleString('en-US')} GB physical, largest VM ${virt.agg.maxRam} GB)`],
-              ['Total storage', ext ? `${virt.externalStorageNeeded.toLocaleString('en-US')} GB usable (external)` : `${virt.agg.storage.toLocaleString('en-US')} GB × ${virt.repl} = ${(virt.agg.storage*virt.repl).toLocaleString('en-US')} GB`],
+              ['Total RAM', `${fmt(virt.agg.ram)} GB (~${fmt(Math.ceil(virt.demand.ram))} GB physical, largest VM ${virt.agg.maxRam} GB)`],
+              ['Total storage', ext ? `${fmt(virt.externalStorageNeeded)} GB usable (external)` : `${fmt(virt.agg.storage)} GB × ${virt.repl} = ${fmt(virt.agg.storage*virt.repl)} GB`],
               ['Total GPUs', String(virt.agg.gpu)],
-            ] });
-          vy = doc.lastAutoTable.finalY + 6;
+            ] }) + 6;
 
           const resultBody = virt.mode === 'pool'
             ? [
@@ -2510,8 +2498,8 @@
                 ['Surviving RAM (GB)', `demand ${Math.ceil(virt.demand.ram)} / ${Math.round(virt.cap.ram.surviving)} avail`],
                 ['DR sites', String(virt.sites)],
                 ['Total physical hosts', String(virt.totals.totalHosts)],
-                ['Total cores / threads', `${virt.totals.cores.toLocaleString('en-US')} / ${virt.totals.threads.toLocaleString('en-US')}`],
-                ['Total RAM', `${virt.totals.ram.toLocaleString('en-US')} GB`],
+                ['Total cores / threads', `${fmt(virt.totals.cores)} / ${fmt(virt.totals.threads)}`],
+                ['Total RAM', `${fmt(virt.totals.ram)} GB`],
                 ['Total GPUs', String(virt.totals.gpus)],
               ]
             : [
@@ -2520,42 +2508,62 @@
                 ['Recommended hosts / site', `${virt.decided}${virt.autoNodes ? ' (auto)' : ' (manual)'}`],
                 ['DR sites', String(virt.sites)],
                 ['Total physical hosts', String(virt.totals.totalHosts)],
-                ['Total cores / threads', `${virt.totals.cores.toLocaleString('en-US')} / ${virt.totals.threads.toLocaleString('en-US')}`],
-                ['Total RAM', `${virt.totals.ram.toLocaleString('en-US')} GB`],
-                [ext ? 'External usable storage' : 'Total raw local storage', `${(ext ? virt.externalStorageNeeded : virt.totals.storage).toLocaleString('en-US')} GB`],
+                ['Total cores / threads', `${fmt(virt.totals.cores)} / ${fmt(virt.totals.threads)}`],
+                ['Total RAM', `${fmt(virt.totals.ram)} GB`],
+                [ext ? 'External usable storage' : 'Total raw local storage', `${fmt(ext ? virt.externalStorageNeeded : virt.totals.storage)} GB`],
                 ['Total GPUs', String(virt.totals.gpus)],
               ];
-          doc.autoTable({ startY: vy, theme: 'grid', headStyles: { fillColor: [12, 50, 44] }, styles: { fontSize: 9 }, margin: { left: margin, right: margin },
-            head: [['Host sizing result', 'Value']], body: resultBody });
-          vy = doc.lastAutoTable.finalY + 6;
+          vy = table({ startY: vy, styles: { font: 'helvetica', fontSize: 9, cellPadding: 1.6 },
+            headStyles: { fillColor: DARK, textColor: 255, fontStyle: 'bold' },
+            head: [['Host sizing result', 'Value']], body: resultBody }) + 6;
 
-          doc.autoTable({ startY: vy, theme: 'plain', styles: { fontSize: 9 }, margin: { left: margin, right: margin },
-            head: [['Design rule checks', '']], headStyles: { fillColor: [48, 186, 120], textColor: 255 },
+          vy = table({ startY: vy, theme: 'plain', styles: { font: 'helvetica', fontSize: 9, cellPadding: 1.6 },
+            head: [['Design rule checks', '']], headStyles: { fillColor: GREEN, textColor: 255, fontStyle: 'bold' },
             body: virt.checks.map(c => [c.ok ? 'PASS' : 'FAIL', c.label]),
-            didParseCell: (d) => { if (d.section === 'body' && d.column.index === 0) { d.cell.styles.textColor = d.cell.raw === 'PASS' ? [22,140,90] : [200,40,40]; d.cell.styles.fontStyle = 'bold'; } } });
-          vy = doc.lastAutoTable.finalY + 6;
+            didParseCell: (d) => { if (d.section === 'body' && d.column.index === 0) { d.cell.styles.textColor = d.cell.raw === 'PASS' ? [22,140,90] : [200,40,40]; d.cell.styles.fontStyle = 'bold'; } } }) + 6;
+
           if (virtCfg.dr.note) {
-            doc.setFontSize(9); doc.setTextColor('#6b7280');
-            const dl = doc.splitTextToSize(`DR strategy: ${virtCfg.dr.note}`, pageW - margin * 2);
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(MUTE);
+            const dl = doc.splitTextToSize(`DR strategy: ${virtCfg.dr.note}`, pageW() - margin * 2);
             doc.text(dl, margin, vy); vy += dl.length * 4 + 2;
           }
-          y = vy; // continue the disclaimer flow after this page
+          y = vy; // continue the disclaimer flow on this page
         }
 
-        // Disclaimer
+        /* ---- Disclaimer ---- */
         const disclaimer = "Disclaimer: This report was generated by an unofficial, community-built planning " +
           "tool and does not constitute official SUSE information, guidance, or a commitment. All figures are " +
           "rough estimates intended for early planning purposes only and may not reflect current product " +
           "requirements. Before making any sizing, purchasing, or deployment decision, consult the official " +
           "SUSE documentation and a qualified SUSE professional.";
-        const pageH = doc.internal.pageSize.getHeight();
-        const lines = doc.setFontSize(8).splitTextToSize(disclaimer, pageW - margin * 2);
-        const blockH = lines.length * 4 + 8;
-        if (y + blockH > pageH - margin) { doc.addPage('a4', 'p'); y = 20; }
-        doc.setDrawColor('#d1d5db'); doc.setLineWidth(0.2);
-        doc.line(margin, y, pageW - margin, y); y += 6;
-        doc.setTextColor('#6b7280'); doc.setFontSize(8);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8);
+        const lines = doc.splitTextToSize(disclaimer, pageW() - margin * 2);
+        const blockH = lines.length * 3.6 + 8;
+        if (y + blockH > pageH() - CONTENT_BOTTOM) { doc.addPage('a4', 'p'); y = CONTENT_TOP; }
+        doc.setDrawColor(RULE); doc.setLineWidth(0.2);
+        doc.line(margin, y, pageW() - margin, y); y += 5;
+        doc.setTextColor(MUTE); doc.setFontSize(8);
         doc.text(lines, margin, y);
+
+        /* ---- Stamp a consistent header + footer on every page ---- */
+        const total = doc.internal.getNumberOfPages();
+        for (let i = 1; i <= total; i++) {
+          doc.setPage(i);
+          const W = pageW(), H = pageH();
+          // Header
+          if (logo) { const lw = 8 * logo.ratio; doc.addImage(logo.dataUrl, 'PNG', margin, 7, lw, 8); }
+          doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(INK);
+          doc.text('SUSE AI Sizing Report', margin + (logo ? 8 * logo.ratio + 4 : 0), 13);
+          doc.setDrawColor(GREEN[0], GREEN[1], GREEN[2]); doc.setLineWidth(0.5);
+          doc.line(margin, 20, W - margin, 20);
+          // Footer
+          doc.setDrawColor(RULE); doc.setLineWidth(0.2);
+          doc.line(margin, H - 12, W - margin, H - 12);
+          doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(MUTE);
+          doc.text(`Generated ${dateStr}`, margin, H - 7);
+          doc.text('Planning estimate — not an official SUSE product', W / 2, H - 7, { align: 'center' });
+          doc.text(`Page ${i} of ${total}`, W - margin, H - 7, { align: 'right' });
+        }
 
         doc.save('SUSE_AI_Sizing_Report.pdf');
       }
