@@ -24,7 +24,7 @@ The SUSE AI Sizing Architect lets you model a cluster, attach SUSE AI services a
 - **Per-group fault tolerance** — add **N + x spare nodes** to any group to provision HA headroom; the spares are cloned from the group's profile and counted in all capacity totals (e.g. `4 nodes (3+1 FT)`).
 - **Per-node configuration** — flip any group into per-node mode to give individual nodes distinct CPU / RAM / storage / GPU values, and add or remove nodes freely.
 - **SUSE AI services** — NeuVector (Security), Longhorn (Storage), Private Registry, Milvus, Ollama, Open WebUI and Observability, several with selectable sizing profiles.
-- **Custom applications** — add arbitrary workloads so their resource demand is folded into every total.
+- **Custom applications** — add arbitrary workloads so their resource demand is folded into every total. A built-in **App Catalog** offers common workloads, plus an optional **AI sizing lookup** for anything not listed: bring your own API key for **Anthropic (Claude)**, **OpenAI (GPT)** or **Google (Gemini)** and the model estimates conservative CPU / RAM / storage / GPU. The key is stored only in your browser and sent directly to the chosen provider — never to any backend — and calls are billed to your own account.
 - **Bare-metal virtualization sizing** — plan the SUSE Virtualization (Harvester) hosts that run SUSE AI. Define one or more **physical host types** (sockets/cores/threads, RAM, storage, GPUs, optional hypervisor reservation), set CPU/RAM overcommit and an N+x resiliency policy, and the tool treats every cluster node as a VM to derive sizing. **GPU VMs are pinned 1:1** (never overcommitted) automatically. Two modes: **Auto** (how many identical hosts are needed, with per-host utilization in normal and degraded states) and **Pool** (capacity-check a mixed/heterogeneous inventory, reserving the largest hosts for failure). Supports extra VMs, external storage arrays (FC / iSCSI / DAS / CSI / NFS), and multi-site DR. Full formulas, assumptions and references are documented in [METHODOLOGY.md](METHODOLOGY.md).
 - **Live totals** — a sticky sidebar shows total capacity vs. demand and remaining headroom in real time, flagging GPU deficits automatically.
 - **Architecture diagram** — an auto-generated visual of your cluster and the services running on it.
@@ -81,7 +81,7 @@ Two constants at the top of the `<script>` block in `index.html` are meant to be
 
 ```js
 const GITHUB_URL  = "https://github.com/doccaz/suse-ai-sizing-tool"; // "Fork on GitHub" ribbon
-const APP_VERSION = "2.3.0";                                          // shown in footer & About
+const APP_VERSION = "2.4.0";                                          // shown in footer & About
 ```
 
 ## Project structure
@@ -114,6 +114,8 @@ The commit history tracks the evolution of the tool from its first app.new scaff
 | 2026-06-23 | **v2.1.0** | Virtualization tab: bare-metal SUSE Virtualization (Harvester) host sizing — multiple host types (auto & mixed-inventory modes), automatic GPU VM pinning, overcommit, fault tolerance, optional hypervisor reservation, external storage and DR; documented in METHODOLOGY.md |
 | 2026-06-24 | **v2.2.0** | Cluster Sizing: reusable named node profiles (scale-up vs scale-out), enable/disable any node group (CPU-only deployments), per-group N+x fault tolerance, and a lower control-plane default (4c/8g) |
 | 2026-06-24 | **v2.3.0** | Multi-cluster fleet model: in-tab cluster switcher, suggested Rancher Management cluster, dedicated Observability cluster (suggested when the service is added), per-cluster + fleet rollup totals, and fleet-wide aggregation across the diagram, virtualization and PDF report |
+| 2026-06-24 | **v2.3.1** | Consistent all-vector PDF report (Helvetica) with a shared header/footer, page numbers and a vectorized fleet-summary page |
+| 2026-06-24 | **v2.4.0** | App Catalog AI sizing lookup is now multi-provider (bring-your-own-key for Anthropic, OpenAI or Google Gemini), with a per-provider key store and an explanatory tooltip |
 
 ## Disclaimer
 

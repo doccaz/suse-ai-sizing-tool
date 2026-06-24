@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.3.1";
+      const APP_VERSION = "2.4.0";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -1397,14 +1397,56 @@
       /* =====================================================================
          CATALOG BROWSER (overlay)
       ===================================================================== */
+      /* AI sizing-lookup providers. Each builds its own request shape and extracts
+         the model's text from the response; all are called directly from the browser
+         with a user-supplied, locally-stored key (no backend). */
+      const AI_SYS = 'Return ONLY a valid JSON object — no markdown fences, no explanation.';
+      const AI_PROVIDERS = {
+        anthropic: {
+          label: 'Anthropic (Claude)', keyHint: 'sk-ant-…', model: 'claude-haiku-4-5-20251001',
+          request: (key, prompt, model) => ({
+            url: 'https://api.anthropic.com/v1/messages',
+            headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-allow-browser': 'true' },
+            body: { model, max_tokens: 256, system: AI_SYS, messages: [{ role: 'user', content: prompt }] },
+          }),
+          extract: (data) => data.content?.[0]?.text || '',
+        },
+        openai: {
+          label: 'OpenAI (GPT)', keyHint: 'sk-…', model: 'gpt-4o-mini',
+          request: (key, prompt, model) => ({
+            url: 'https://api.openai.com/v1/chat/completions',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+            body: { model, max_tokens: 256, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: AI_SYS }, { role: 'user', content: prompt }] },
+          }),
+          extract: (data) => data.choices?.[0]?.message?.content || '',
+        },
+        gemini: {
+          label: 'Google (Gemini)', keyHint: 'AIza…', model: 'gemini-2.0-flash',
+          request: (key, prompt, model) => ({
+            url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
+            headers: { 'Content-Type': 'application/json' },
+            body: { system_instruction: { parts: [{ text: AI_SYS }] }, contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json' } },
+          }),
+          extract: (data) => data.candidates?.[0]?.content?.parts?.[0]?.text || '',
+        },
+      };
+
       function CatalogBrowser({ onClose, onAdd }) {
         const [search, setSearch] = React.useState('');
         const [cat, setCat] = React.useState('All');
-        const [apiKey, setApiKey] = React.useState(() => { try { return localStorage.getItem('suse-ai-anthropic-key') || ''; } catch(e) { return ''; } });
+        const [provider, setProvider] = React.useState(() => { try { return AI_PROVIDERS[localStorage.getItem('suse-ai-provider')] ? localStorage.getItem('suse-ai-provider') : 'anthropic'; } catch(e) { return 'anthropic'; } });
+        // Keys are kept per provider so switching providers remembers each one. The
+        // legacy 'suse-ai-anthropic-key' is read as a fallback for older sessions.
+        const [keys, setKeys] = React.useState(() => {
+          const g = (k) => { try { return localStorage.getItem(k) || ''; } catch(e) { return ''; } };
+          return { anthropic: g('suse-ai-key-anthropic') || g('suse-ai-anthropic-key'), openai: g('suse-ai-key-openai'), gemini: g('suse-ai-key-gemini') };
+        });
         const [showKey, setShowKey] = React.useState(false);
         const [aiState, setAiState] = React.useState(null); // null | 'loading' | {result} | {error}
 
-        const saveKey = (k) => { setApiKey(k); try { localStorage.setItem('suse-ai-anthropic-key', k); } catch(e) {} };
+        const apiKey = keys[provider] || '';
+        const saveKey = (k) => { setKeys(prev => ({ ...prev, [provider]: k })); try { localStorage.setItem(`suse-ai-key-${provider}`, k); } catch(e) {} };
+        const changeProvider = (p) => { setProvider(p); setAiState(null); try { localStorage.setItem('suse-ai-provider', p); } catch(e) {} };
 
         const filtered = APP_CATALOG.filter(a => {
           const mCat = cat === 'All' || a.cat === cat;
@@ -1415,26 +1457,15 @@
 
         const lookupAI = async () => {
           if (!apiKey.trim()) { setShowKey(true); return; }
+          const prov = AI_PROVIDERS[provider];
           setAiState('loading');
           try {
-            const resp = await fetch('https://api.anthropic.com/v1/messages', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'x-api-key': apiKey.trim(),
-                'anthropic-version': '2023-06-01',
-                'anthropic-dangerous-allow-browser': 'true',
-              },
-              body: JSON.stringify({
-                model: 'claude-haiku-4-5-20251001',
-                max_tokens: 256,
-                system: 'Return ONLY a valid JSON object — no markdown fences, no explanation.',
-                messages: [{ role: 'user', content: `Provide Kubernetes resource sizing for: "${search}". Return JSON: {"name":"<display name>","description":"<one sentence>","cpu":<int vCPU>,"ram":<int GB>,"storage":<int GB>,"gpu":<int GPUs, usually 0>}. Use conservatively-sized production estimates.` }]
-              })
-            });
+            const prompt = `Provide Kubernetes resource sizing for: "${search}". Return JSON: {"name":"<display name>","description":"<one sentence>","cpu":<int vCPU>,"ram":<int GB>,"storage":<int GB>,"gpu":<int GPUs, usually 0>}. Use conservatively-sized production estimates.`;
+            const req = prov.request(apiKey.trim(), prompt, prov.model);
+            const resp = await fetch(req.url, { method: 'POST', headers: req.headers, body: JSON.stringify(req.body) });
             if (!resp.ok) throw new Error(`API ${resp.status}`);
             const data = await resp.json();
-            const text = (data.content?.[0]?.text || '').replace(/```json|```/g,'').trim();
+            const text = (prov.extract(data) || '').replace(/```json|```/g,'').trim();
             const parsed = JSON.parse(text);
             setAiState({ result: parsed });
           } catch(e) {
@@ -1453,7 +1484,7 @@
               <div className="flex items-center justify-between px-5 py-4 border-b border-suse-border">
                 <h2 className="font-bold text-white flex items-center"><PackageIcon size={18} className="mr-2 text-suse-green"/>App Catalog</h2>
                 <div className="flex items-center gap-2">
-                  <button onClick={() => setShowKey(!showKey)} className={`text-xs flex items-center px-2.5 py-1.5 rounded-md border transition-colors ${showKey ? 'border-suse-green text-suse-green' : 'border-suse-border text-gray-400 hover:text-suse-green hover:border-suse-green'}`}><Settings size={13} className="mr-1.5"/>AI Key</button>
+                  <button onClick={() => setShowKey(!showKey)} title="Optional: choose an AI provider (Anthropic, OpenAI or Google) and paste your own API key to let it estimate sizing for apps that aren't in the catalog. The key is stored only in this browser and sent directly to the provider's API — never to our servers. Calls are billed to your own account with that provider." className={`text-xs flex items-center px-2.5 py-1.5 rounded-md border transition-colors ${showKey ? 'border-suse-green text-suse-green' : 'border-suse-border text-gray-400 hover:text-suse-green hover:border-suse-green'}`}><Settings size={13} className="mr-1.5"/>AI Key</button>
                   <button onClick={onClose} className="text-gray-400 hover:text-white"><XCircle size={20}/></button>
                 </div>
               </div>
@@ -1462,7 +1493,11 @@
               {showKey && (
                 <div className="px-5 py-3 border-b border-suse-border bg-suse-bg/60 flex items-center gap-3">
                   <KeyIcon size={16} className="text-suse-green flex-shrink-0"/>
-                  <input type="password" value={apiKey} onChange={e => saveKey(e.target.value)} placeholder="Anthropic API key (sk-ant-…) — stored locally, never sent to our servers"
+                  <select value={provider} onChange={e => changeProvider(e.target.value)}
+                    className="bg-suse-bg border border-suse-border rounded px-2 py-1.5 text-sm text-gray-200 focus:border-suse-green focus:outline-none flex-shrink-0">
+                    {Object.entries(AI_PROVIDERS).map(([id, p]) => <option key={id} value={id}>{p.label}</option>)}
+                  </select>
+                  <input type="password" value={apiKey} onChange={e => saveKey(e.target.value)} placeholder={`${AI_PROVIDERS[provider].label} API key (${AI_PROVIDERS[provider].keyHint}) — stored locally, never sent to our servers`}
                     className="flex-1 bg-suse-bg border border-suse-border rounded px-3 py-1.5 text-sm text-gray-200 focus:border-suse-green focus:outline-none font-mono"/>
                   {apiKey && <span className="text-xs text-suse-green flex items-center"><CheckCircle size={13} className="mr-1"/>Saved</span>}
                 </div>
@@ -1518,7 +1553,7 @@
                         {aiState === 'loading' && (
                           <div className="flex items-center justify-center gap-2 text-sm text-suse-green">
                             <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                            Asking Claude…
+                            Asking {AI_PROVIDERS[provider].label}…
                           </div>
                         )}
                         {aiState?.result && (
@@ -1539,7 +1574,7 @@
                         {!aiState && (
                           <button onClick={lookupAI}
                             className="mx-auto flex items-center gap-2 px-4 py-2 rounded-lg border border-suse-green/40 text-suse-green text-sm hover:bg-suse-green/10 transition-colors">
-                            <Brain size={16}/>Ask Claude for sizing estimate{!apiKey && <span className="text-gray-500 text-xs ml-1">(API key needed)</span>}
+                            <Brain size={16}/>Ask {AI_PROVIDERS[provider].label} for sizing estimate{!apiKey && <span className="text-gray-500 text-xs ml-1">(API key needed)</span>}
                           </button>
                         )}
                       </div>
