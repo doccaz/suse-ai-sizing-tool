@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.1.1";
+      const APP_VERSION = "2.1.2";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -1284,7 +1284,7 @@
       const PhysHostCard = ({ host, forPdf }) => (
         <div className={`rounded-lg shadow-md w-56 flex-shrink-0 overflow-hidden border ${forPdf ? 'bg-white border-gray-300' : 'bg-suse-panel border-suse-border'}`}>
           <div className={`font-bold p-2.5 flex items-center justify-between text-sm ${forPdf ? 'bg-[#0C322C] text-white' : 'bg-suse-border text-white'}`}>
-            <span className="flex items-center min-w-0"><Server size={15} className="mr-2 text-suse-green flex-shrink-0" /><span className="truncate">{host.name}</span></span>
+            <span className="flex items-center min-w-0"><Server size={15} className="mr-2 text-suse-green flex-shrink-0" /><span className={forPdf ? 'break-words' : 'truncate'}>{host.name}</span></span>
             <span className={`ml-2 flex-shrink-0 text-xs font-mono px-1.5 py-0.5 rounded ${forPdf ? 'bg-[#30BA78] text-white' : 'bg-suse-green/20 text-suse-green'}`}>×{host.count}</span>
           </div>
           <div className={`p-3 space-y-1.5 text-xs ${forPdf ? 'text-[#0C322C]' : 'text-gray-300'}`}>
