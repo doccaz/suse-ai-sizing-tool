@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.2.0";
+      const APP_VERSION = "2.3.0";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -161,6 +161,7 @@
         { id: 'p_medium', name: 'Medium (8c / 32g)',       cpu: 8,  ram: 32, storage: 200, gpus: 0 },
         { id: 'p_large',  name: 'Large (16c / 64g)',       cpu: 16, ram: 64, storage: 500, gpus: 0 },
         { id: 'p_gpu',    name: 'GPU (16c / 32g / 1 GPU)', cpu: 16, ram: 32, storage: 250, gpus: 1 },
+        { id: 'p_mgmt',   name: 'Management (4c / 16g)',   cpu: 4,  ram: 16, storage: 100, gpus: 0 },
       ]);
 
       /* Effective provisioned nodes for a base group: empty when disabled, and
@@ -172,6 +173,79 @@
         const base = g.nodes[g.nodes.length - 1] || g.nodes[0];
         if (!ft || !base) return g.nodes;
         return [...g.nodes, ...Array.from({ length: ft }, (_, i) => ({ ...base, id: `${base.id}-ft${i}`, _spare: true }))];
+      };
+
+      /* ---------------- Cluster fleet model (v2.3) ----------------
+         A deployment is a fleet of clusters, each with the same per-cluster shape
+         (base node groups + services + custom apps) as the original single cluster.
+         role: 'management' (Rancher) | 'observability' | 'workload' (downstream AI). */
+      const buildGroup = (profiles, key, count, opts = {}) => {
+        const pid = opts.profileId || baseComponentData[key].defaultProfileId;
+        const p = profiles.find(x => x.id === pid) || profiles[0];
+        return { enabled: opts.enabled !== false, custom: false, profileId: pid, faultTolerance: 0,
+          nodes: Array.from({ length: count }, () => ({ id: uid(), cpu: p.cpu, ram: p.ram, storage: p.storage, gpus: p.gpus || 0 })) };
+      };
+
+      const defaultServices = () => ({
+        suseSecurity:   { selected: false, profile: 'default' },
+        suseStorage:    { selected: false, profile: 'default' },
+        privateRegistry:{ selected: false, profile: 'default' },
+        milvus:         { selected: false, profile: 'minimal' },
+        ollama:         { selected: true,  profile: 'default' },
+        openWebUI:      { selected: true,  profile: 'default' },
+        observability:  { selected: false, profile: '20_ha' },
+      });
+
+      const makeWorkloadCluster = (profiles, name = 'SUSE AI #1') => ({
+        id: uid(), name, role: 'workload', enabled: true,
+        base: {
+          controlPlane:       buildGroup(profiles, 'controlPlane', 3),
+          gpuWorkerNodes:     buildGroup(profiles, 'gpuWorkerNodes', 1),
+          generalWorkerNodes: buildGroup(profiles, 'generalWorkerNodes', 1),
+        },
+        services: defaultServices(), customApps: [],
+      });
+
+      // Rancher management cluster: HA control plane (3 × Management profile); worker
+      // groups present but disabled (a management cluster runs no AI workloads).
+      const makeManagementCluster = (profiles) => ({
+        id: uid(), name: 'Rancher Management', role: 'management', enabled: true,
+        base: {
+          controlPlane:       buildGroup(profiles, 'controlPlane', 3, { profileId: 'p_mgmt' }),
+          gpuWorkerNodes:     buildGroup(profiles, 'gpuWorkerNodes', 1, { enabled: false }),
+          generalWorkerNodes: buildGroup(profiles, 'generalWorkerNodes', 1, { enabled: false }),
+        },
+        services: defaultServices(), customApps: [],
+      });
+
+      // Dedicated SUSE Observability cluster: HA control plane + general workers sized
+      // to host the chosen Observability profile (1 worker for non-HA, 2 for HA). The
+      // Observability service is selected here (and removed from workload clusters).
+      const makeObservabilityCluster = (profiles, obsProfileId = '20_ha') => {
+        const obs = servicesData.observability.profiles;
+        const pid = obs[obsProfileId] ? obsProfileId : '20_ha';
+        const op = obs[pid];
+        const ha = !pid.includes('non_ha');
+        const workerCount = ha ? 2 : 1;
+        const services = defaultServices();
+        Object.keys(services).forEach(k => { services[k] = { ...services[k], selected: false }; });
+        services.observability = { selected: true, profile: pid };
+        return {
+          id: uid(), name: 'Observability', role: 'observability', enabled: true,
+          base: {
+            controlPlane:       buildGroup(profiles, 'controlPlane', 3, { profileId: 'p_small' }),
+            gpuWorkerNodes:     buildGroup(profiles, 'gpuWorkerNodes', 1, { enabled: false }),
+            generalWorkerNodes: { enabled: true, custom: true, profileId: 'p_medium', faultTolerance: 0,
+              nodes: Array.from({ length: workerCount }, () => ({ id: uid(), cpu: op.cpu, ram: op.ram, storage: op.storage, gpus: 0 })) },
+          },
+          services, customApps: [],
+        };
+      };
+
+      const CLUSTER_ROLE = {
+        management:    { label: 'Rancher Management', icon: Settings, accent: 'sky' },
+        observability: { label: 'Observability',      icon: Cpu,      accent: 'violet' },
+        workload:      { label: 'Downstream',         icon: Server,   accent: 'emerald' },
       };
 
       const servicesData = {
@@ -292,6 +366,32 @@
       const uid = () => Math.random().toString(36).slice(2, 9);
       const blankSummary = () => ({ cpu: 0, ram: 0, storage: 0, gpu: 0 });
 
+      /* Capacity vs. demand for a single cluster (its effective nodes vs. its
+         selected services + custom apps). Used per-cluster and summed for the fleet. */
+      const computeSummary = (cluster) => {
+        const capacity = blankSummary();
+        const demand = blankSummary();
+        baseOrder.forEach(key => {
+          effNodes(cluster.base[key]).forEach(n => {
+            capacity.cpu += n.cpu; capacity.ram += n.ram; capacity.storage += n.storage; capacity.gpu += (n.gpus || 0);
+          });
+        });
+        const serviceDetails = [];
+        Object.entries(cluster.services).forEach(([id, cfg]) => {
+          if (!cfg.selected) return;
+          const p = servicesData[id].profiles[cfg.profile];
+          demand.cpu += p.cpu; demand.ram += p.ram; demand.storage += p.storage; demand.gpu += (p.gpu || 0);
+          serviceDetails.push({ ...p, name: servicesData[id].name, profile: p.name });
+        });
+        (cluster.customApps || []).forEach(a => {
+          demand.cpu += a.cpu; demand.ram += a.ram; demand.storage += a.storage; demand.gpu += (a.gpu || 0);
+          serviceDetails.push({ name: a.name, profile: 'Custom', cpu: a.cpu, ram: a.ram, storage: a.storage, gpu: a.gpu });
+        });
+        const deltas = { cpu: capacity.cpu - demand.cpu, ram: capacity.ram - demand.ram, storage: capacity.storage - demand.storage, gpu: capacity.gpu - demand.gpu };
+        const counts = { controlPlane: effNodes(cluster.base.controlPlane).length, gpuWorkerNodes: effNodes(cluster.base.gpuWorkerNodes).length, generalWorkerNodes: effNodes(cluster.base.generalWorkerNodes).length };
+        return { capacity, demand, deltas, serviceDetails, counts };
+      };
+
       /* Default config for the Virtualization (SUSE Virtualization / Harvester) tab.
          Host defaults mirror a typical 2-socket bare-metal node; the spreadsheet's
          reference host was "2 * 24 cores + Hyperthreading = 96 vCPU, 8 * 64 = 512 GB". */
@@ -340,19 +440,43 @@
           dr: { ...d.dr, ...cur.dr },
           customVms: Array.isArray(cur.customVms) ? cur.customVms : [],
         };
-        if (!Array.isArray(s.customApps)) s.customApps = [];
-        // Node profiles (added v2.2): seed defaults and ensure each base group has
-        // enabled / faultTolerance / profileId fields.
+        // Node profiles (added v2.2): seed defaults; ensure the management profile exists.
         if (!Array.isArray(s.nodeProfiles) || !s.nodeProfiles.length) s.nodeProfiles = defaultProfiles();
-        if (s.base && typeof s.base === 'object') {
+        if (!s.nodeProfiles.some(p => p.id === 'p_mgmt')) s.nodeProfiles.push({ id: 'p_mgmt', name: 'Management (4c / 16g)', cpu: 4, ram: 16, storage: 100, gpus: 0 });
+
+        // Ensure each base group has enabled / faultTolerance / profileId fields.
+        const fixGroups = (base) => {
+          if (!base || typeof base !== 'object') return;
           baseOrder.forEach(key => {
-            const g = s.base[key];
+            const g = base[key];
             if (!g || typeof g !== 'object') return;
             if (g.enabled === undefined) g.enabled = true;
             if (g.faultTolerance === undefined) g.faultTolerance = 0;
             if (g.profileId === undefined) g.profileId = baseComponentData[key].defaultProfileId;
           });
+        };
+
+        // Fleet model (added v2.3): wrap a pre-2.3 single cluster (top-level base/
+        // services/customApps) into a clusters[] array and add a management cluster.
+        if (!Array.isArray(s.clusters)) {
+          const workload = {
+            id: uid(), name: 'SUSE AI #1', role: 'workload', enabled: true,
+            base: (s.base && typeof s.base === 'object') ? s.base : makeWorkloadCluster(s.nodeProfiles).base,
+            services: s.services || defaultServices(),
+            customApps: Array.isArray(s.customApps) ? s.customApps : [],
+          };
+          s.clusters = [ makeManagementCluster(s.nodeProfiles), workload ];
+          s.selectedClusterId = workload.id;
         }
+        delete s.base; delete s.services; delete s.customApps;
+
+        s.clusters = s.clusters.map(c => ({
+          enabled: true, role: 'workload', customApps: [], ...c,
+          id: c.id || uid(),
+          services: c.services || defaultServices(),
+        }));
+        s.clusters.forEach(c => fixGroups(c.base));
+        if (!s.clusters.some(c => c.id === s.selectedClusterId)) s.selectedClusterId = s.clusters[s.clusters.length - 1].id;
         return s;
       };
 
@@ -403,35 +527,15 @@
         const [catalogOpen, setCatalogOpen] = useState(false);
         const fileInputRef = useRef(null);
 
-        const nodeFromProfile = (p) => ({ id: uid(), cpu: p.cpu, ram: p.ram, storage: p.storage, gpus: p.gpus || 0 });
-        const makeProfileNodes = (p, count) => Array.from({ length: count }, () => nodeFromProfile(p));
-
         const defaultState = () => {
           const profs = defaultProfiles();
-          const byId = (id) => profs.find(p => p.id === id);
-          const group = (key, count) => {
-            const pid = baseComponentData[key].defaultProfileId;
-            return { enabled: true, custom: false, profileId: pid, faultTolerance: 0, nodes: makeProfileNodes(byId(pid), count) };
-          };
+          const workload = makeWorkloadCluster(profs);
           return ({
-          nodeProfiles: profs,
-          base: {
-            controlPlane:       group('controlPlane', 3),
-            gpuWorkerNodes:     group('gpuWorkerNodes', 1),
-            generalWorkerNodes: group('generalWorkerNodes', 1),
-          },
-          services: {
-            suseSecurity: { selected: false, profile: 'default' },
-            suseStorage: { selected: false, profile: 'default' },
-            privateRegistry: { selected: false, profile: 'default' },
-            milvus: { selected: false, profile: 'minimal' },
-            ollama: { selected: true, profile: 'default' },
-            openWebUI: { selected: true, profile: 'default' },
-            observability: { selected: false, profile: '20_ha' },
-          },
-          customApps: [],
-          virtualization: defaultVirt(),
-        });
+            nodeProfiles: profs,
+            clusters: [ makeManagementCluster(profs), workload ],
+            selectedClusterId: workload.id,
+            virtualization: defaultVirt(),
+          });
         };
 
         const [state, setState] = useState(() => loadInitialState(defaultState));
@@ -443,9 +547,63 @@
 
         const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
 
-        /* ---- base node mutations ---- */
+        /* ---- selected cluster ---- */
+        const cluster = state.clusters.find(c => c.id === state.selectedClusterId) || state.clusters[0];
+
+        // Apply an updater to whichever cluster is currently selected.
+        const setSelCluster = (updater) =>
+          setState(s => ({ ...s, clusters: s.clusters.map(c => c.id === s.selectedClusterId ? updater(c, s) : c) }));
+
+        /* ---- cluster fleet management ---- */
+        const selectCluster = (id) => setState(s => ({ ...s, selectedClusterId: id }));
+        const toggleCluster = (id, v) => setState(s => ({ ...s, clusters: s.clusters.map(c => c.id === id ? { ...c, enabled: v } : c) }));
+        const renameCluster = (id, name) => setState(s => ({ ...s, clusters: s.clusters.map(c => c.id === id ? { ...c, name } : c) }));
+        const addCluster = () => setState(s => {
+          const n = s.clusters.filter(c => c.role === 'workload').length + 1;
+          const wc = makeWorkloadCluster(s.nodeProfiles, `SUSE AI #${n}`);
+          return { ...s, clusters: [...s.clusters, wc], selectedClusterId: wc.id };
+        });
+        const removeCluster = (id) => setState(s => {
+          const target = s.clusters.find(c => c.id === id);
+          // Only downstream clusters are removable, and never the last one; special
+          // clusters (management/observability) are toggled off instead.
+          if (!target || target.role !== 'workload' || s.clusters.filter(c => c.role === 'workload').length <= 1) return s;
+          const clusters = s.clusters.filter(c => c.id !== id);
+          const selectedClusterId = s.selectedClusterId === id ? clusters[clusters.length - 1].id : s.selectedClusterId;
+          return { ...s, clusters, selectedClusterId };
+        });
+
+        /* ---- dedicated Observability cluster (suggested when the service is added) ---- */
+        // Move Observability into its own cluster: create it from the profile currently
+        // selected on a workload cluster, then deselect the service on all workloads.
+        const createObsCluster = () => setState(s => {
+          if (s.clusters.some(c => c.role === 'observability')) return s;
+          const src = s.clusters.find(c => c.role === 'workload' && c.services.observability && c.services.observability.selected);
+          const obsProfile = src ? src.services.observability.profile : '20_ha';
+          const obs = makeObservabilityCluster(s.nodeProfiles, obsProfile);
+          const clusters = s.clusters.map(c => c.role === 'workload'
+            ? { ...c, services: { ...c.services, observability: { ...c.services.observability, selected: false } } }
+            : c);
+          return { ...s, clusters: [...clusters, obs], selectedClusterId: obs.id };
+        });
+        // Fold Observability back: remove the dedicated cluster and re-enable the service
+        // on the first workload cluster at the same profile.
+        const removeObsCluster = () => setState(s => {
+          const obs = s.clusters.find(c => c.role === 'observability');
+          if (!obs) return s;
+          const profile = (obs.services.observability && obs.services.observability.profile) || '20_ha';
+          let restored = false;
+          const clusters = s.clusters.filter(c => c.id !== obs.id).map(c => {
+            if (!restored && c.role === 'workload') { restored = true; return { ...c, services: { ...c.services, observability: { selected: true, profile } } }; }
+            return c;
+          });
+          const selectedClusterId = s.selectedClusterId === obs.id ? clusters[clusters.length - 1].id : s.selectedClusterId;
+          return { ...s, clusters, selectedClusterId };
+        });
+
+        /* ---- base node mutations (operate on the selected cluster) ---- */
         const setGroup = (key, updater) =>
-          setState(s => ({ ...s, base: { ...s.base, [key]: updater(s.base[key]) } }));
+          setSelCluster(c => ({ ...c, base: { ...c.base, [key]: updater(c.base[key]) } }));
 
         const toggleCustom = (key, v) => setGroup(key, g => ({ ...g, custom: v }));
         const setGroupEnabled = (key, v) => setGroup(key, g => ({ ...g, enabled: v }));
@@ -459,61 +617,71 @@
           return g.nodes[g.nodes.length - 1] || baseComponentData[key].defaultConfig;
         };
 
-        const setCount = (key, count) => setState(s => ({ ...s, base: { ...s.base, [key]: (g => {
+        const setCount = (key, count) => setSelCluster((c, s) => {
+          const g = c.base[key];
           const nodes = [...g.nodes];
           const seed = seedConfig(s, key, g);
           if (count > nodes.length) for (let i = nodes.length; i < count; i++) nodes.push({ id: uid(), cpu: seed.cpu, ram: seed.ram, storage: seed.storage, gpus: seed.gpus || 0 });
           else nodes.length = Math.max(1, count);
-          return { ...g, nodes };
-        })(s.base[key]) } }));
+          return { ...c, base: { ...c.base, [key]: { ...g, nodes } } };
+        });
 
         // Assign a reusable profile to a group (uniform mode) and rewrite every node
         // in the group to that profile's spec, preserving the node count.
-        const setGroupProfile = (key, profileId) => setState(s => {
+        const setGroupProfile = (key, profileId) => setSelCluster((c, s) => {
           const p = (s.nodeProfiles || []).find(pr => pr.id === profileId);
-          const g = s.base[key];
+          const g = c.base[key];
           const nodes = p ? g.nodes.map(n => ({ ...n, cpu: p.cpu, ram: p.ram, storage: p.storage, gpus: p.gpus || 0 })) : g.nodes;
-          return { ...s, base: { ...s.base, [key]: { ...g, profileId, nodes } } };
+          return { ...c, base: { ...c.base, [key]: { ...g, profileId, nodes } } };
         });
 
-        const addNode = (key) => setState(s => ({ ...s, base: { ...s.base, [key]: (g => {
+        const addNode = (key) => setSelCluster((c, s) => {
+          const g = c.base[key];
           const seed = seedConfig(s, key, g);
-          return { ...g, nodes: [...g.nodes, { id: uid(), cpu: seed.cpu, ram: seed.ram, storage: seed.storage, gpus: seed.gpus || 0 }] };
-        })(s.base[key]) } }));
+          return { ...c, base: { ...c.base, [key]: { ...g, nodes: [...g.nodes, { id: uid(), cpu: seed.cpu, ram: seed.ram, storage: seed.storage, gpus: seed.gpus || 0 }] } } };
+        });
         const removeNode = (key, id) => setGroup(key, g => ({ ...g, nodes: g.nodes.length > 1 ? g.nodes.filter(n => n.id !== id) : g.nodes }));
         const updateNode = (key, id, field, value) => setGroup(key, g => ({ ...g, nodes: g.nodes.map(n => n.id === id ? { ...n, [field]: Math.max(0, parseInt(value, 10) || 0) } : n) }));
 
-        /* ---- reusable node profiles ---- */
+        /* ---- reusable node profiles (shared across the whole fleet) ---- */
         const addProfile = () => setState(s => {
           const id = uid();
           return { ...s, nodeProfiles: [...(s.nodeProfiles || []), { id, name: 'New profile', cpu: 4, ram: 8, storage: 100, gpus: 0 }] };
         });
-        // Edit a profile and propagate to every uniform-mode group using it.
+        // Rewrite every uniform-mode group (in every cluster) that uses this profile.
+        const applyProfileToClusters = (clusters, p) => clusters.map(c => ({
+          ...c, base: Object.fromEntries(baseOrder.map(key => {
+            const g = c.base[key];
+            return [key, (g && !g.custom && g.profileId === p.id)
+              ? { ...g, nodes: g.nodes.map(n => ({ ...n, cpu: p.cpu, ram: p.ram, storage: p.storage, gpus: p.gpus || 0 })) }
+              : g];
+          })),
+        }));
         const updateProfile = (id, field, value) => setState(s => {
           const v = field === 'name' ? value : Math.max(0, parseInt(value, 10) || 0);
           const nodeProfiles = (s.nodeProfiles || []).map(p => p.id === id ? { ...p, [field]: v } : p);
           const p = nodeProfiles.find(pr => pr.id === id);
-          const base = { ...s.base };
-          if (field !== 'name' && p) baseOrder.forEach(key => {
-            const g = base[key];
-            if (g && !g.custom && g.profileId === id) base[key] = { ...g, nodes: g.nodes.map(n => ({ ...n, cpu: p.cpu, ram: p.ram, storage: p.storage, gpus: p.gpus || 0 })) };
-          });
-          return { ...s, nodeProfiles, base };
+          const clusters = (field !== 'name' && p) ? applyProfileToClusters(s.clusters, p) : s.clusters;
+          return { ...s, nodeProfiles, clusters };
         });
         const removeProfile = (id) => setState(s => {
           const remaining = (s.nodeProfiles || []).filter(p => p.id !== id);
           if (!remaining.length) return s; // never delete the last profile
           const fallback = remaining[0].id;
-          const base = { ...s.base };
-          baseOrder.forEach(key => { if (base[key] && base[key].profileId === id) base[key] = { ...base[key], profileId: fallback }; });
-          return { ...s, nodeProfiles: remaining, base };
+          const clusters = s.clusters.map(c => ({
+            ...c, base: Object.fromEntries(baseOrder.map(key => {
+              const g = c.base[key];
+              return [key, (g && g.profileId === id) ? { ...g, profileId: fallback } : g];
+            })),
+          }));
+          return { ...s, nodeProfiles: remaining, clusters };
         });
 
-        /* ---- services / custom apps ---- */
-        const setService = (id, field, value) => setState(s => ({ ...s, services: { ...s.services, [id]: { ...s.services[id], [field]: value } } }));
-        const addCustomApp = () => setState(s => ({ ...s, customApps: [...s.customApps, { id: uid(), name: 'Custom App', cpu: 2, ram: 4, storage: 20, gpu: 0 }] }));
-        const updateCustomApp = (id, field, value) => setState(s => ({ ...s, customApps: s.customApps.map(a => a.id === id ? { ...a, [field]: field === 'name' ? value : Math.max(0, parseInt(value, 10) || 0) } : a) }));
-        const removeCustomApp = (id) => setState(s => ({ ...s, customApps: s.customApps.filter(a => a.id !== id) }));
+        /* ---- services / custom apps (operate on the selected cluster) ---- */
+        const setService = (id, field, value) => setSelCluster(c => ({ ...c, services: { ...c.services, [id]: { ...c.services[id], [field]: value } } }));
+        const addCustomApp = () => setSelCluster(c => ({ ...c, customApps: [...c.customApps, { id: uid(), name: 'Custom App', cpu: 2, ram: 4, storage: 20, gpu: 0 }] }));
+        const updateCustomApp = (id, field, value) => setSelCluster(c => ({ ...c, customApps: c.customApps.map(a => a.id === id ? { ...a, [field]: field === 'name' ? value : Math.max(0, parseInt(value, 10) || 0) } : a) }));
+        const removeCustomApp = (id) => setSelCluster(c => ({ ...c, customApps: c.customApps.filter(a => a.id !== id) }));
 
         /* ---- virtualization tab ---- */
         const setVirtSection = (section, field, value) =>
@@ -527,30 +695,29 @@
         const updateVirtVm = (id, field, value) => setState(s => ({ ...s, virtualization: { ...s.virtualization, customVms: s.virtualization.customVms.map(v => v.id === id ? { ...v, [field]: field === 'name' ? value : Math.max(0, parseInt(value, 10) || 0) } : v) } }));
         const removeVirtVm = (id) => setState(s => ({ ...s, virtualization: { ...s.virtualization, customVms: s.virtualization.customVms.filter(v => v.id !== id) } }));
 
-        /* ---- derived summary ---- */
-        const summary = useMemo(() => {
+        /* ---- derived summaries ---- */
+        // Selected cluster (drives the Sizing-tab editor + its sidebar totals).
+        const summary = useMemo(() => computeSummary(cluster), [cluster]);
+
+        // Fleet rollup across every enabled cluster (drives the Summary/Diagram tabs,
+        // the PDF report and the "Fleet total" card in the sidebar).
+        const fleet = useMemo(() => {
           const capacity = blankSummary();
           const demand = blankSummary();
-          baseOrder.forEach(key => {
-            effNodes(state.base[key]).forEach(n => {
-              capacity.cpu += n.cpu; capacity.ram += n.ram; capacity.storage += n.storage; capacity.gpu += (n.gpus || 0);
-            });
-          });
           const serviceDetails = [];
-          Object.entries(state.services).forEach(([id, cfg]) => {
-            if (!cfg.selected) return;
-            const p = servicesData[id].profiles[cfg.profile];
-            demand.cpu += p.cpu; demand.ram += p.ram; demand.storage += p.storage; demand.gpu += (p.gpu || 0);
-            serviceDetails.push({ ...p, name: servicesData[id].name, profile: p.name });
-          });
-          state.customApps.forEach(a => {
-            demand.cpu += a.cpu; demand.ram += a.ram; demand.storage += a.storage; demand.gpu += (a.gpu || 0);
-            serviceDetails.push({ name: a.name, profile: 'Custom', cpu: a.cpu, ram: a.ram, storage: a.storage, gpu: a.gpu });
+          const per = state.clusters.filter(c => c.enabled).map(c => ({ cluster: c, summary: computeSummary(c) }));
+          per.forEach(({ summary: cs }) => {
+            ['cpu','ram','storage','gpu'].forEach(k => { capacity[k] += cs.capacity[k]; demand[k] += cs.demand[k]; });
+            serviceDetails.push(...cs.serviceDetails);
           });
           const deltas = { cpu: capacity.cpu - demand.cpu, ram: capacity.ram - demand.ram, storage: capacity.storage - demand.storage, gpu: capacity.gpu - demand.gpu };
-          const counts = { controlPlane: effNodes(state.base.controlPlane).length, gpuWorkerNodes: effNodes(state.base.gpuWorkerNodes).length, generalWorkerNodes: effNodes(state.base.generalWorkerNodes).length };
-          return { capacity, demand, deltas, serviceDetails, counts };
-        }, [state]);
+          const counts = {
+            controlPlane: per.reduce((a, p) => a + p.summary.counts.controlPlane, 0),
+            gpuWorkerNodes: per.reduce((a, p) => a + p.summary.counts.gpuWorkerNodes, 0),
+            generalWorkerNodes: per.reduce((a, p) => a + p.summary.counts.generalWorkerNodes, 0),
+          };
+          return { capacity, demand, deltas, serviceDetails, counts, per, clusterCount: per.length };
+        }, [state.clusters]);
 
         /* ---- virtualization / hypervisor sizing ----
            Each Kubernetes node defined in the Cluster Sizing tab is treated as one VM
@@ -574,11 +741,12 @@
           const maxVmsPerNode = Math.max(1, v.cluster.maxVmsPerNode);
           const ceil = (a, b) => (b > 0 ? Math.ceil(a / b) : 0);
 
-          // Build the VM fleet: every k8s node is a VM, plus custom VMs (expanded by count).
+          // Build the VM fleet: every k8s node across every enabled cluster is a VM,
+          // plus custom VMs (expanded by count).
           const vms = [];
           const groupLabels = { controlPlane: 'Control Plane', gpuWorkerNodes: 'GPU Worker', generalWorkerNodes: 'General Worker' };
-          baseOrder.forEach(key => effNodes(state.base[key]).forEach((n, i) =>
-            vms.push({ name: `${groupLabels[key]} ${i + 1}`, cpu: n.cpu, ram: n.ram, storage: n.storage, gpu: n.gpus || 0 })));
+          state.clusters.filter(c => c.enabled).forEach(c => baseOrder.forEach(key => effNodes(c.base[key]).forEach((n, i) =>
+            vms.push({ name: `${c.name} · ${groupLabels[key]} ${i + 1}`, cpu: n.cpu, ram: n.ram, storage: n.storage, gpu: n.gpus || 0 }))));
           v.customVms.forEach(cv => {
             const count = Math.max(0, cv.count || 0);
             for (let i = 0; i < count; i++) vms.push({ name: count > 1 ? `${cv.name} ${i + 1}` : cv.name, cpu: cv.cpu, ram: cv.ram, storage: cv.storage, gpu: cv.gpu || 0 });
@@ -705,9 +873,10 @@
 
         const activeNetworkRules = useMemo(() => {
           const rules = [networkData.rancher, networkData.clusterInternal];
-          ['suseSecurity','suseStorage','privateRegistry','observability'].forEach(k => { if (state.services[k].selected) rules.push(networkData[k]); });
+          const anySelected = (k) => state.clusters.some(c => c.enabled && c.services[k] && c.services[k].selected);
+          ['suseSecurity','suseStorage','privateRegistry','observability'].forEach(k => { if (anySelected(k)) rules.push(networkData[k]); });
           return rules;
-        }, [state.services]);
+        }, [state.clusters]);
 
         /* ---- share / import / export ---- */
         const copyShareLink = () => {
@@ -727,7 +896,7 @@
           const file = e.target.files[0]; if (!file) return;
           const reader = new FileReader();
           reader.onload = (ev) => {
-            try { const parsed = JSON.parse(ev.target.result); if (parsed.base && parsed.services) { setState(migrateState(parsed)); showToast("Configuration imported"); } else showToast("Invalid config file"); }
+            try { const parsed = JSON.parse(ev.target.result); if (isValidConfig(parsed)) { setState(migrateState(parsed)); showToast("Configuration imported"); } else showToast("Invalid config file"); }
             catch (err) { showToast("Could not parse file"); }
           };
           reader.readAsText(file); e.target.value = '';
@@ -737,7 +906,7 @@
           setBusy(true);
           try {
             await ensurePdfLibs();
-            await generatePdfReport(summary, activeNetworkRules, virtSummary, state.virtualization);
+            await generatePdfReport(fleet, activeNetworkRules, virtSummary, state.virtualization);
             showToast("PDF report generated");
           } catch (e) {
             console.error(e);
@@ -747,7 +916,7 @@
         };
 
         const addFromCatalog = (entry) => {
-          setState(s => ({ ...s, customApps: [...s.customApps, { id: uid(), name: entry.name, cpu: entry.cpu, ram: entry.ram, storage: entry.storage, gpu: entry.gpu || 0 }] }));
+          setSelCluster(c => ({ ...c, customApps: [...c.customApps, { id: uid(), name: entry.name, cpu: entry.cpu, ram: entry.ram, storage: entry.storage, gpu: entry.gpu || 0 }] }));
           setCatalogOpen(false);
         };
 
@@ -798,7 +967,9 @@
             <main className="flex-1">
               <div className="max-w-7xl mx-auto p-4 sm:p-6 pb-24">
                 {activeTab === 'sizing' && (
-                  <SizingTab state={state} summary={summary}
+                  <SizingTab state={state} cluster={cluster} summary={summary} fleet={fleet}
+                    selectCluster={selectCluster} toggleCluster={toggleCluster} renameCluster={renameCluster} addCluster={addCluster} removeCluster={removeCluster}
+                    createObsCluster={createObsCluster} removeObsCluster={removeObsCluster}
                     toggleCustom={toggleCustom} setCount={setCount} addNode={addNode} removeNode={removeNode} updateNode={updateNode}
                     setGroupEnabled={setGroupEnabled} setFaultTolerance={setFaultTolerance} setGroupProfile={setGroupProfile}
                     addProfile={addProfile} updateProfile={updateProfile} removeProfile={removeProfile}
@@ -811,9 +982,9 @@
                     addHost={addHost} updateHost={updateHost} removeHost={removeHost} setPrimaryHost={setPrimaryHost}
                     addVirtVm={addVirtVm} updateVirtVm={updateVirtVm} removeVirtVm={removeVirtVm} />
                 )}
-                {activeTab === 'diagram' && <DiagramTab state={state} summary={summary} virtSummary={virtSummary} />}
+                {activeTab === 'diagram' && <DiagramTab state={state} summary={fleet} virtSummary={virtSummary} />}
                 {activeTab === 'network' && <NetworkTab rules={activeNetworkRules} />}
-                {activeTab === 'summary' && <SummaryTab summary={summary} />}
+                {activeTab === 'summary' && <SummaryTab summary={fleet} />}
                 {activeTab === 'howto' && <HowToTab />}
                 {activeTab === 'about' && <AboutTab />}
               </div>
@@ -821,8 +992,8 @@
 
             {/* Hidden render targets for PDF capture */}
             <div className="fixed -left-[9999px] top-0" aria-hidden="true">
-              <div id="pdf-summary" style={{ width: 760, background: '#ffffff', padding: 24, color: '#0C322C' }}><PdfSummary summary={summary} /></div>
-              <div id="pdf-diagram" style={{ width: 1100, background: '#ffffff', padding: 24 }}><DiagramTab state={state} summary={summary} virtSummary={virtSummary} forPdf /></div>
+              <div id="pdf-summary" style={{ width: 760, background: '#ffffff', padding: 24, color: '#0C322C' }}><PdfSummary summary={fleet} /></div>
+              <div id="pdf-diagram" style={{ width: 1100, background: '#ffffff', padding: 24 }}><DiagramTab state={state} summary={fleet} virtSummary={virtSummary} forPdf /></div>
             </div>
 
             <footer className="text-center py-4 text-xs text-gray-600 border-t border-suse-border">
@@ -860,16 +1031,85 @@
       );
 
       /* =====================================================================
+         CLUSTER SWITCHER — selects which cluster in the fleet is being edited
+      ===================================================================== */
+      function ClusterSwitcher({ state, cluster, fleet, selectCluster, toggleCluster, removeCluster, addCluster }) {
+        const workloadCount = state.clusters.filter(c => c.role === 'workload').length;
+        return (
+          <Panel className="p-3">
+            <div className="flex items-center gap-2 flex-wrap">
+              {state.clusters.map(c => {
+                const role = CLUSTER_ROLE[c.role] || CLUSTER_ROLE.workload;
+                const RIcon = role.icon;
+                const sel = c.id === cluster.id;
+                return (
+                  <div key={c.id} onClick={() => selectCluster(c.id)}
+                    className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 cursor-pointer transition-colors ${sel ? 'border-suse-green bg-suse-green/10' : 'border-suse-border bg-suse-bg hover:border-suse-green/50'} ${c.enabled ? '' : 'opacity-50'}`}>
+                    <RIcon size={14} className={sel ? 'text-suse-green' : 'text-gray-400'} />
+                    <div className="leading-tight">
+                      <div className={`text-sm font-bold ${sel ? 'text-white' : 'text-gray-300'}`}>{c.name}</div>
+                      <div className="text-[10px] uppercase tracking-wider text-gray-500">{role.label}</div>
+                    </div>
+                    <label onClick={(e) => e.stopPropagation()} className="flex items-center cursor-pointer ml-1" title={c.enabled ? 'Included in fleet' : 'Excluded from fleet'}>
+                      <input type="checkbox" checked={c.enabled} onChange={(e) => toggleCluster(c.id, e.target.checked)} className="sr-only peer" />
+                      <span className="w-8 h-4 bg-suse-panel border border-suse-border rounded-full relative peer-checked:bg-suse-green/30 peer-checked:border-suse-green after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-3 after:h-3 after:rounded-full after:bg-gray-400 peer-checked:after:bg-suse-green after:transition-all peer-checked:after:translate-x-4"></span>
+                    </label>
+                    {c.role === 'workload' && workloadCount > 1 && (
+                      <button onClick={(e) => { e.stopPropagation(); removeCluster(c.id); }} className="text-red-400 hover:text-red-300 ml-0.5"><Trash2 size={13} /></button>
+                    )}
+                  </div>
+                );
+              })}
+              <button onClick={addCluster} className="flex items-center gap-1.5 rounded-lg border border-dashed border-suse-border px-3 py-2 text-xs text-suse-green hover:border-suse-green hover:bg-suse-green/5"><Plus size={14} />Add downstream</button>
+            </div>
+            <div className="mt-2.5 pt-2.5 border-t border-suse-border text-[11px] text-gray-500 flex flex-wrap gap-x-4 gap-y-1">
+              <span><strong className="text-gray-300">Fleet:</strong> {fleet.clusterCount} cluster{fleet.clusterCount !== 1 ? 's' : ''} enabled</span>
+              <span>{fleet.capacity.cpu} vCPU</span>
+              <span>{fleet.capacity.ram} GB RAM</span>
+              <span>{fleet.capacity.storage} GB storage</span>
+              <span>{fleet.capacity.gpu} GPU</span>
+            </div>
+          </Panel>
+        );
+      }
+
+      /* =====================================================================
          SIZING TAB
       ===================================================================== */
       function SizingTab(props) {
-        const { state, summary } = props;
+        const { state, cluster, summary, fleet } = props;
+        const roleMeta = CLUSTER_ROLE[cluster.role] || CLUSTER_ROLE.workload;
+        const isWorkload = cluster.role === 'workload';
+        const isObs = cluster.role === 'observability';
+        const obsCluster = state.clusters.find(c => c.role === 'observability');
+        // Recommend a dedicated cluster once Observability is selected on a workload cluster.
+        const suggestObs = isWorkload && !obsCluster && cluster.services.observability && cluster.services.observability.selected;
         return (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 space-y-6">
+              <ClusterSwitcher state={state} cluster={cluster} fleet={fleet}
+                selectCluster={props.selectCluster} toggleCluster={props.toggleCluster}
+                removeCluster={props.removeCluster} addCluster={props.addCluster} />
+
               <Panel className="p-5">
-                <h2 className="text-lg font-bold text-white mb-1">Plan your SUSE AI deployment</h2>
-                <p className="text-sm text-gray-400">SUSE AI is an open, secure, enterprise-grade platform for deploying generative AI and LLMs. Configure your cluster below — totals update live in the sidebar.</p>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    {isWorkload ? (
+                      <input value={cluster.name} onChange={(e) => props.renameCluster(cluster.id, e.target.value)}
+                        className="text-lg font-bold text-white bg-transparent border-b border-transparent hover:border-suse-border focus:border-suse-green focus:outline-none w-full" />
+                    ) : (
+                      <h2 className="text-lg font-bold text-white mb-1">{cluster.name}</h2>
+                    )}
+                    <p className="text-sm text-gray-400 mt-1">
+                      {cluster.role === 'management'
+                        ? 'Rancher management cluster — runs the Rancher control plane that manages your downstream clusters. Sized for HA, no AI workloads.'
+                        : cluster.role === 'observability'
+                        ? 'Dedicated SUSE Observability cluster — collects metrics, logs and traces for the fleet.'
+                        : 'Downstream SUSE AI cluster — configure its nodes and services below. Totals update live in the sidebar.'}
+                    </p>
+                  </div>
+                  <span className="text-[10px] uppercase tracking-wider text-gray-500 whitespace-nowrap bg-suse-bg border border-suse-border rounded px-2 py-1">{roleMeta.label}</span>
+                </div>
               </Panel>
 
               <div>
@@ -902,20 +1142,47 @@
                 <SectionLabel icon={Server}>Base Cluster Nodes</SectionLabel>
                 <div className="space-y-4">
                   {baseOrder.map(key => (
-                    <BaseGroup key={key} groupKey={key} group={state.base[key]} gpuDemand={summary.demand.gpu} gpuDelta={summary.deltas.gpu} {...props} />
+                    <BaseGroup key={key} groupKey={key} group={cluster.base[key]} gpuDemand={summary.demand.gpu} gpuDelta={summary.deltas.gpu} {...props} />
                   ))}
                 </div>
               </div>
 
               <div>
                 <SectionLabel icon={Layers}>Additional Services</SectionLabel>
+
+                {isObs && (
+                  <div className="bg-violet-500/10 border border-violet-500/30 text-violet-200 rounded-lg p-3 flex items-start justify-between gap-3 text-xs mb-4">
+                    <div className="flex items-start"><Info size={16} className="mr-2 mt-0.5 flex-shrink-0" />
+                      <div>This is the dedicated <strong>Observability</strong> cluster. Size its control plane and workers below; the SUSE Observability profile sets the demand.</div></div>
+                    <button onClick={props.removeObsCluster} className="flex-shrink-0 px-2.5 py-1.5 rounded-md border border-violet-400/50 text-violet-100 hover:bg-violet-500/20 whitespace-nowrap">Merge back</button>
+                  </div>
+                )}
+
+                {suggestObs && (
+                  <div className="bg-suse-green/10 border border-suse-green/30 text-suse-green rounded-lg p-3 flex items-start justify-between gap-3 text-xs mb-4">
+                    <div className="flex items-start"><CheckCircle size={16} className="mr-2 mt-0.5 flex-shrink-0" />
+                      <div><strong>Recommended:</strong> run SUSE Observability in its own cluster. We'll create a dedicated, right-sized Observability cluster and remove its demand from your downstream clusters.</div></div>
+                    <button onClick={props.createObsCluster} className="flex-shrink-0 px-2.5 py-1.5 rounded-md border border-suse-green/50 text-suse-green hover:bg-suse-green/20 whitespace-nowrap flex items-center"><Plus size={13} className="mr-1" />Create cluster</button>
+                  </div>
+                )}
+
+                {obsCluster && isWorkload && (
+                  <div className="bg-violet-500/10 border border-violet-500/30 text-violet-200 rounded-lg p-3 flex items-start justify-between gap-3 text-xs mb-4">
+                    <div className="flex items-start"><Info size={16} className="mr-2 mt-0.5 flex-shrink-0" />
+                      <div>SUSE Observability runs in the dedicated <strong>{obsCluster.name}</strong> cluster, so it's not sized per downstream cluster here.</div></div>
+                    <button onClick={() => props.selectCluster(obsCluster.id)} className="flex-shrink-0 px-2.5 py-1.5 rounded-md border border-violet-400/50 text-violet-100 hover:bg-violet-500/20 whitespace-nowrap">Edit it</button>
+                  </div>
+                )}
+
                 <div className="bg-sky-500/10 border border-sky-500/30 text-sky-200 rounded-lg p-3 flex items-start text-xs mb-4">
                   <Info size={16} className="mr-2 mt-0.5 flex-shrink-0" />
                   <div>A subset of available services is shown. For the full catalog, visit the <a href="https://apps.rancher.com" target="_blank" rel="noopener noreferrer" className="font-bold underline">SUSE Application Collection</a>.</div>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {Object.entries(servicesData).map(([id, data]) => (
-                    <ServiceCard key={id} id={id} data={data} sel={state.services[id]} setService={props.setService} />
+                  {Object.entries(servicesData)
+                    .filter(([id]) => !(id === 'observability' && obsCluster && isWorkload))
+                    .map(([id, data]) => (
+                    <ServiceCard key={id} id={id} data={data} sel={cluster.services[id]} setService={props.setService} />
                   ))}
                 </div>
               </div>
@@ -927,14 +1194,14 @@
                     <button onClick={props.addCustomApp} className="text-xs flex items-center text-suse-green hover:text-emerald-300"><Plus size={14} className="mr-1" />Add manually</button>
                   </div>
                 }>Custom Applications</SectionLabel>
-                {state.customApps.length === 0 ? (
+                {cluster.customApps.length === 0 ? (
                   <Panel className="p-6 text-center border-dashed">
                     <p className="text-sm text-gray-500 mb-3">No custom apps yet.</p>
                     <button onClick={props.openCatalog} className="mx-auto flex items-center gap-2 px-4 py-2 rounded-lg border border-suse-green/40 text-suse-green text-sm hover:bg-suse-green/10 transition-colors"><PackageIcon size={16}/>Browse App Catalog</button>
                   </Panel>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {state.customApps.map(app => (
+                    {cluster.customApps.map(app => (
                       <CustomAppCard key={app.id} app={app} update={props.updateCustomApp} remove={props.removeCustomApp} />
                     ))}
                   </div>
@@ -946,7 +1213,7 @@
             <div className="lg:col-span-1">
               <div className="lg:sticky lg:top-32 space-y-4">
                 <Panel className="p-5">
-                  <SectionLabel icon={ClipboardList}>Live Totals</SectionLabel>
+                  <SectionLabel icon={ClipboardList}>This Cluster — {cluster.name}</SectionLabel>
                   <LiveTotals summary={summary} />
                 </Panel>
                 <Panel className="p-5">
@@ -957,6 +1224,10 @@
                     <DeltaStat icon={HardDrive} label="Storage GB" value={summary.deltas.storage} />
                     <DeltaStat icon={Layers} label="GPU" value={summary.deltas.gpu} />
                   </div>
+                </Panel>
+                <Panel className="p-5 border-suse-green/40">
+                  <SectionLabel icon={Layers}>Fleet Total — {fleet.clusterCount} cluster{fleet.clusterCount !== 1 ? 's' : ''}</SectionLabel>
+                  <LiveTotals summary={fleet} />
                 </Panel>
               </div>
             </div>
@@ -1317,13 +1588,68 @@
       /* =====================================================================
          DIAGRAM TAB
       ===================================================================== */
+      // One architecture block per cluster: control-plane row + worker plane & services.
+      function ClusterArchitecture({ cluster, forPdf, textMain, textSub }) {
+        const selectedServices = Object.entries(cluster.services).filter(([, c]) => c.selected).map(([id]) => servicesData[id]);
+        const cpNodes = effNodes(cluster.base.controlPlane);
+        const gpuNodes = effNodes(cluster.base.gpuWorkerNodes);
+        const genNodes = effNodes(cluster.base.generalWorkerNodes);
+        const role = CLUSTER_ROLE[cluster.role] || CLUSTER_ROLE.workload;
+        const none = <span className={`text-xs italic ${textSub}`}>None — disabled</span>;
+        return (
+          <div className={`rounded-xl p-4 ${forPdf ? 'border border-gray-300' : 'border border-suse-border bg-suse-bg/30'}`}>
+            <h3 className={`text-base font-bold text-center ${textMain}`}>{cluster.name}</h3>
+            <p className={`text-[10px] uppercase tracking-wider text-center mb-4 ${textSub}`}>{role.label} cluster</p>
+
+            <div>
+              <h4 className={`text-xs font-bold uppercase tracking-wider text-center mb-3 ${textSub}`}>Control Plane</h4>
+              <div className="flex justify-center flex-wrap gap-4">
+                {cpNodes.length ? cpNodes.map((n, i) => <NodeCard key={n.id} title={`Control Plane ${i + 1}`} node={n} forPdf={forPdf} />) : none}
+              </div>
+            </div>
+
+            <div className="flex justify-center"><div className={`border-l-2 border-dashed h-6 ${forPdf ? 'border-gray-300' : 'border-suse-border'}`}></div></div>
+
+            <div className={`rounded-xl p-5 ${forPdf ? 'border-2 border-dashed border-[#30BA78]' : 'border-2 border-dashed border-suse-green/40 bg-suse-bg/40'}`}>
+              <h4 className="text-sm font-bold uppercase tracking-wider text-center text-suse-green mb-4">Worker Plane &amp; Services</h4>
+
+              {(selectedServices.length > 0 || cluster.customApps.length > 0) && (
+                <div className="flex justify-center flex-wrap gap-2 mb-5">
+                  {selectedServices.map(s => {
+                    const Icon = s.icon;
+                    return <span key={s.name} className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border ${forPdf ? 'bg-[#30BA78]/10 text-[#0C322C] border-[#30BA78]/40' : 'bg-suse-green/10 text-suse-green border-suse-green/40'}`}><Icon size={13} />{s.name}</span>;
+                  })}
+                  {cluster.customApps.map(a => (
+                    <span key={a.id} className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border ${forPdf ? 'bg-gray-100 text-[#0C322C] border-gray-300' : 'bg-suse-border text-gray-200 border-suse-border'}`}><Edit3 size={13} />{a.name}</span>
+                  ))}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <h5 className={`text-xs font-bold uppercase text-center mb-3 ${textSub}`}>GPU-Enabled Workers</h5>
+                  <div className="flex justify-center flex-wrap gap-4">
+                    {gpuNodes.length ? gpuNodes.map((n, i) => <NodeCard key={n.id} title={`GPU Worker ${i + 1}`} node={n} forPdf={forPdf} />) : none}
+                  </div>
+                </div>
+                <div>
+                  <h5 className={`text-xs font-bold uppercase text-center mb-3 ${textSub}`}>General Purpose Workers</h5>
+                  <div className="flex justify-center flex-wrap gap-4">
+                    {genNodes.length ? genNodes.map((n, i) => <NodeCard key={n.id} title={`GP Worker ${i + 1}`} node={n} forPdf={forPdf} />) : none}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
       function DiagramTab({ state, summary, virtSummary, forPdf }) {
-        const groups = baseOrder.map(key => ({ key, meta: baseComponentData[key], nodes: state.base[key].nodes }));
-        const selectedServices = Object.entries(state.services).filter(([, c]) => c.selected).map(([id]) => servicesData[id]);
         const textMain = forPdf ? 'text-[#0C322C]' : 'text-white';
         const textSub = forPdf ? 'text-gray-600' : 'text-gray-400';
+        const clusters = state.clusters.filter(c => c.enabled);
 
-        // Physical virtualization layer: which hosts run the cluster VMs, and across how many sites.
+        // Physical virtualization layer: which hosts run the fleet's VMs, and across how many sites.
         const vs = virtSummary;
         const physHosts = vs ? (vs.mode === 'pool'
           ? vs.hostCaps.filter(h => h.count > 0).map(h => ({ name: h.name, count: h.count, cores: h.cores, threads: h.threads, ram: h.rawRam, storage: h.storage, gpu: h.gpu }))
@@ -1334,49 +1660,10 @@
         return (
           <div className={`space-y-6 ${forPdf ? '' : 'bg-suse-panel border border-suse-border rounded-xl p-6'}`}>
             <h2 className={`text-xl font-bold text-center ${textMain}`}>Proposed Architecture</h2>
+            <p className={`text-xs text-center -mt-3 ${textSub}`}>{clusters.length} cluster{clusters.length !== 1 ? 's' : ''} · {summary.capacity.cpu} vCPU · {summary.capacity.ram} GB RAM · {summary.capacity.gpu} GPU (fleet)</p>
 
-            <div>
-              <h3 className={`text-sm font-bold uppercase tracking-wider text-center mb-3 ${textSub}`}>Control Plane</h3>
-              <div className="flex justify-center flex-wrap gap-4">
-                {effNodes(state.base.controlPlane).map((n, i) => <NodeCard key={n.id} title={`Control Plane ${i + 1}`} node={n} forPdf={forPdf} />)}
-              </div>
-            </div>
-
-            <div className="flex justify-center"><div className={`border-l-2 border-dashed h-8 ${forPdf ? 'border-gray-300' : 'border-suse-border'}`}></div></div>
-
-            <div className={`rounded-xl p-5 ${forPdf ? 'border-2 border-dashed border-[#30BA78]' : 'border-2 border-dashed border-suse-green/40 bg-suse-bg/40'}`}>
-              <h3 className="text-sm font-bold uppercase tracking-wider text-center text-suse-green mb-4">Worker Plane &amp; Services</h3>
-
-              {selectedServices.length > 0 && (
-                <div className="flex justify-center flex-wrap gap-2 mb-5">
-                  {selectedServices.map(s => {
-                    const Icon = s.icon;
-                    return <span key={s.name} className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border ${forPdf ? 'bg-[#30BA78]/10 text-[#0C322C] border-[#30BA78]/40' : 'bg-suse-green/10 text-suse-green border-suse-green/40'}`}><Icon size={13} />{s.name}</span>;
-                  })}
-                  {state.customApps.map(a => (
-                    <span key={a.id} className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border ${forPdf ? 'bg-gray-100 text-[#0C322C] border-gray-300' : 'bg-suse-border text-gray-200 border-suse-border'}`}><Edit3 size={13} />{a.name}</span>
-                  ))}
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <h4 className={`text-xs font-bold uppercase text-center mb-3 ${textSub}`}>GPU-Enabled Workers ({summary.capacity.gpu} GPU total)</h4>
-                  <div className="flex justify-center flex-wrap gap-4">
-                    {effNodes(state.base.gpuWorkerNodes).length
-                      ? effNodes(state.base.gpuWorkerNodes).map((n, i) => <NodeCard key={n.id} title={`GPU Worker ${i + 1}`} node={n} forPdf={forPdf} />)
-                      : <span className={`text-xs italic ${textSub}`}>None — GPU workers disabled</span>}
-                  </div>
-                </div>
-                <div>
-                  <h4 className={`text-xs font-bold uppercase text-center mb-3 ${textSub}`}>General Purpose Workers</h4>
-                  <div className="flex justify-center flex-wrap gap-4">
-                    {effNodes(state.base.generalWorkerNodes).length
-                      ? effNodes(state.base.generalWorkerNodes).map((n, i) => <NodeCard key={n.id} title={`GP Worker ${i + 1}`} node={n} forPdf={forPdf} />)
-                      : <span className={`text-xs italic ${textSub}`}>None — disabled</span>}
-                  </div>
-                </div>
-              </div>
+            <div className="space-y-6">
+              {clusters.map(c => <ClusterArchitecture key={c.id} cluster={c} forPdf={forPdf} textMain={textMain} textSub={textSub} />)}
             </div>
 
             {vs && totalPerSite > 0 && (
@@ -2001,13 +2288,19 @@
       /* =====================================================================
          Helpers: persistence, download, PDF
       ===================================================================== */
+      // A saved config is valid if it has the fleet shape (clusters[]) or the
+      // pre-2.3 single-cluster shape (base + services), which migrateState upgrades.
+      function isValidConfig(parsed) {
+        return !!parsed && (Array.isArray(parsed.clusters) || (parsed.base && parsed.services));
+      }
+
       function loadInitialState(defaultFn) {
         // URL hash takes priority (share links), then localStorage, then defaults.
         try {
           const m = location.hash.match(/cfg=([^&]+)/);
           if (m) {
             const parsed = JSON.parse(decodeURIComponent(atob(m[1])));
-            if (parsed && parsed.base && parsed.services) {
+            if (isValidConfig(parsed)) {
               history.replaceState(null, '', location.pathname + location.search);
               return migrateState(parsed);
             }
@@ -2015,7 +2308,7 @@
         } catch (e) {}
         try {
           const saved = localStorage.getItem('suse-ai-sizing');
-          if (saved) { const parsed = JSON.parse(saved); if (parsed && parsed.base && parsed.services) return migrateState(parsed); }
+          if (saved) { const parsed = JSON.parse(saved); if (isValidConfig(parsed)) return migrateState(parsed); }
         } catch (e) {}
         return defaultFn();
       }
