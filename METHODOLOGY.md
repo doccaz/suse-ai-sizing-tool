@@ -29,6 +29,32 @@ compares **capacity** (what the nodes provide) against **demand** (what the
 selected services and custom apps request) and reports the remaining headroom or
 deficit per resource (vCPU, RAM, storage, GPU).
 
+### Cluster fleet
+
+A deployment is modelled as a **fleet of clusters** rather than a single cluster.
+Each cluster has a **role** and an **enabled** flag, and is sized with the same
+node-group / profile / service model described below:
+
+- **Downstream** (`workload`) — the SUSE AI clusters that run your AI workloads;
+  there can be several.
+- **Rancher Management** — the cluster running the Rancher control plane that
+  manages the downstream clusters. Suggested on by default with HA control-plane
+  sizing (3 × *Management* profile = 4 vCPU / 16 GB) and no AI workloads. Sizing
+  scales with the number of downstream clusters and nodes under management.
+- **Observability** — a dedicated SUSE Observability cluster. Because
+  observability is best isolated from the workloads it watches, enabling the
+  **SUSE Observability** service on a downstream cluster prompts the tool to move
+  it into its own cluster: a 3-node HA control plane plus general workers sized
+  from the chosen Observability profile (1 worker for non-HA, 2 for HA). The
+  service's demand is then removed from the downstream clusters (reversible).
+
+Totals are reported at two levels: **per selected cluster** (the editor's
+sidebar) and a **fleet rollup** that sums capacity and demand over every *enabled*
+cluster. The architecture diagram renders one block per cluster, the PDF report
+adds a per-cluster breakdown table, and the **Virtualization** model treats every
+node of every enabled cluster as a VM (see §2). Disabling a cluster removes it
+from all of these.
+
 ### Node groups
 
 Nodes are organised into three groups: **control plane**, **GPU-enabled
@@ -81,8 +107,9 @@ demand.cpu   = Σ_(selected services) p.cpu + Σ_(custom apps) a.cpu
 delta.cpu    = capacity.cpu − demand.cpu                          (negative ⇒ deficit)
 ```
 
-These effective nodes are exactly the set handed to the **Virtualization** model
-below — each becomes one VM (see §2).
+These sums are **per cluster**; the **fleet rollup** is the same quantities
+summed again over every enabled cluster. The effective nodes are exactly the set
+handed to the **Virtualization** model below — each becomes one VM (see §2).
 
 ---
 
@@ -107,19 +134,21 @@ is the resource that physically constrains placement.
 
 ## 2. The VM fleet
 
-Every *effective* Kubernetes node from the **Cluster Sizing** tab (i.e. nodes of
-enabled groups, including any N + x fault-tolerance spares) becomes exactly one
-virtual machine on the virtualization layer:
+Every *effective* Kubernetes node from **every enabled cluster** in the fleet
+(nodes of enabled groups, including any N + x fault-tolerance spares) becomes
+exactly one virtual machine on the virtualization layer:
 
 - Control-plane nodes → control-plane VMs
 - GPU worker nodes → GPU VMs
 - General-purpose worker nodes → worker VMs
 
-Disabled node groups contribute no VMs.
+Disabled node groups — and disabled clusters — contribute no VMs.
 
 To this we add any **custom VMs** declared on the Virtualization tab (e.g.
-Rancher management cluster, registry, bastion, load balancers), each expanded by
-its `count`.
+registry, bastion, load balancers), each expanded by its `count`. Note that the
+Rancher Management and Observability clusters are now first-class clusters in the
+fleet, so their nodes are already counted above and need not be added as custom
+VMs.
 
 For the fleet we compute, splitting **GPU** (any VM with `gpu > 0`) from
 **non-GPU** VMs:

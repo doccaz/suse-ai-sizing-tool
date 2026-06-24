@@ -1865,7 +1865,7 @@
         );
         return (
           <div style={{ fontFamily: 'Inter, sans-serif' }}>
-            {block('Total Cluster Capacity', summary.capacity)}
+            {block('Total Fleet Capacity', summary.capacity)}
             {block('Services & Apps Demand', summary.demand)}
             {block('Remaining Headroom / Deficit', summary.deltas, true)}
           </div>
@@ -2255,6 +2255,7 @@
                 <div className="border-l border-suse-border pl-3"><h2 className="text-xl font-bold text-white">Sizing Architect</h2><p className="text-xs text-suse-green font-mono">v{APP_VERSION}</p></div>
               </div>
               <p className="text-sm text-gray-400 leading-relaxed">An interactive planning tool for estimating the hardware and network requirements of a SUSE AI deployment. Configure base nodes and services, visualize the architecture, review network rules, and export a shareable report — all client-side in your browser.</p>
+              <p className="text-sm text-gray-300 mt-3 pt-3 border-t border-suse-border">Created by <span className="font-bold text-white">Erico Mendonça</span>.</p>
             </Panel>
             <Panel className="p-6">
               <h3 className="font-bold text-white mb-3">What's included</h3>
@@ -2407,6 +2408,28 @@
         const sW = pageW - margin * 2;
         const sH = (sProps.height * sW) / sProps.width;
         doc.addImage(sImg, 'PNG', margin, 54, sW, sH);
+
+        // Per-cluster fleet breakdown table
+        let clusterY = 54 + sH + 8;
+        if (clusterY > doc.internal.pageSize.getHeight() - 45) { doc.addPage('a4', 'p'); clusterY = 20; }
+        doc.setFontSize(12); doc.setTextColor('#0C322C');
+        doc.text("Cluster Fleet", margin, clusterY);
+        const roleLabel = (r) => (CLUSTER_ROLE[r] || CLUSTER_ROLE.workload).label;
+        doc.autoTable({
+          startY: clusterY + 3, theme: 'grid',
+          headStyles: { fillColor: [48, 186, 120] }, styles: { fontSize: 8 },
+          margin: { left: margin, right: margin },
+          head: [['Cluster', 'Role', 'CP', 'GPU wk', 'Gen wk', 'vCPU', 'RAM GB', 'Stor GB', 'GPU']],
+          body: (summary.per || []).map(({ cluster, summary: cs }) => [
+            cluster.name, roleLabel(cluster.role),
+            cs.counts.controlPlane, cs.counts.gpuWorkerNodes, cs.counts.generalWorkerNodes,
+            cs.capacity.cpu, cs.capacity.ram, cs.capacity.storage, cs.capacity.gpu,
+          ]),
+          foot: [['Fleet total', `${summary.clusterCount} cluster${summary.clusterCount !== 1 ? 's' : ''}`,
+            summary.counts.controlPlane, summary.counts.gpuWorkerNodes, summary.counts.generalWorkerNodes,
+            summary.capacity.cpu, summary.capacity.ram, summary.capacity.storage, summary.capacity.gpu]],
+          footStyles: { fillColor: [12, 50, 44], textColor: 255, fontStyle: 'bold' },
+        });
 
         // Diagram on its own (landscape) page
         const diagramEl = document.getElementById('pdf-diagram');
