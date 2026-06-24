@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SUSE AI Sizing Architect</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20width%3D%2224%22%20height%3D%2224%22%20rx%3D%225%22%20fill%3D%22%230C322C%22%2F%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22%2330BA78%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Crect%20x%3D%226%22%20y%3D%226%22%20width%3D%2212%22%20height%3D%2212%22%20rx%3D%222%22%2F%3E%3Cpath%20d%3D%22M9.5%204v2M14.5%204v2M9.5%2018v2M14.5%2018v2M4%209.5h2M4%2014.5h2M18%209.5h2M18%2014.5h2%22%2F%3E%3C%2Fg%3E%3Crect%20x%3D%229.3%22%20y%3D%229.3%22%20width%3D%225.4%22%20height%3D%225.4%22%20rx%3D%221%22%20fill%3D%22%2330BA78%22%2F%3E%3C%2Fsvg%3E" />
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -73,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.1.0";
+      const APP_VERSION = "2.1.1";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -716,7 +717,7 @@
                     addHost={addHost} updateHost={updateHost} removeHost={removeHost} setPrimaryHost={setPrimaryHost}
                     addVirtVm={addVirtVm} updateVirtVm={updateVirtVm} removeVirtVm={removeVirtVm} />
                 )}
-                {activeTab === 'diagram' && <DiagramTab state={state} summary={summary} />}
+                {activeTab === 'diagram' && <DiagramTab state={state} summary={summary} virtSummary={virtSummary} />}
                 {activeTab === 'network' && <NetworkTab rules={activeNetworkRules} />}
                 {activeTab === 'summary' && <SummaryTab summary={summary} />}
                 {activeTab === 'howto' && <HowToTab />}
@@ -727,7 +728,7 @@
             {/* Hidden render targets for PDF capture */}
             <div className="fixed -left-[9999px] top-0" aria-hidden="true">
               <div id="pdf-summary" style={{ width: 760, background: '#ffffff', padding: 24, color: '#0C322C' }}><PdfSummary summary={summary} /></div>
-              <div id="pdf-diagram" style={{ width: 1100, background: '#ffffff', padding: 24 }}><DiagramTab state={state} summary={summary} forPdf /></div>
+              <div id="pdf-diagram" style={{ width: 1100, background: '#ffffff', padding: 24 }}><DiagramTab state={state} summary={summary} virtSummary={virtSummary} forPdf /></div>
             </div>
 
             <footer className="text-center py-4 text-xs text-gray-600 border-t border-suse-border">
@@ -1169,11 +1170,19 @@
       /* =====================================================================
          DIAGRAM TAB
       ===================================================================== */
-      function DiagramTab({ state, summary, forPdf }) {
+      function DiagramTab({ state, summary, virtSummary, forPdf }) {
         const groups = baseOrder.map(key => ({ key, meta: baseComponentData[key], nodes: state.base[key].nodes }));
         const selectedServices = Object.entries(state.services).filter(([, c]) => c.selected).map(([id]) => servicesData[id]);
         const textMain = forPdf ? 'text-[#0C322C]' : 'text-white';
         const textSub = forPdf ? 'text-gray-600' : 'text-gray-400';
+
+        // Physical virtualization layer: which hosts run the cluster VMs, and across how many sites.
+        const vs = virtSummary;
+        const physHosts = vs ? (vs.mode === 'pool'
+          ? vs.hostCaps.filter(h => h.count > 0).map(h => ({ name: h.name, count: h.count, cores: h.cores, threads: h.threads, ram: h.rawRam, storage: h.storage, gpu: h.gpu }))
+          : [{ name: vs.primary.name, count: vs.decided, cores: vs.primary.cores, threads: vs.primary.threads, ram: vs.primary.rawRam, storage: vs.primary.storage, gpu: vs.primary.gpu }]
+        ) : [];
+        const totalPerSite = physHosts.reduce((s, h) => s + h.count, 0);
 
         return (
           <div className={`space-y-6 ${forPdf ? '' : 'bg-suse-panel border border-suse-border rounded-xl p-6'}`}>
@@ -1218,9 +1227,74 @@
                 </div>
               </div>
             </div>
+
+            {vs && totalPerSite > 0 && (
+              <>
+                <div className="flex justify-center">
+                  <div className={`flex flex-col items-center ${textSub}`}>
+                    <div className={`border-l-2 border-dashed h-8 ${forPdf ? 'border-gray-300' : 'border-suse-border'}`}></div>
+                    <span className="text-[10px] uppercase tracking-wider">runs as VMs on</span>
+                  </div>
+                </div>
+
+                <div className={`rounded-xl p-5 ${forPdf ? 'border-2 border-dashed border-gray-300' : 'border-2 border-dashed border-suse-border bg-suse-bg/40'}`}>
+                  <div className="flex items-center justify-center gap-2 mb-1">
+                    <Boxes size={16} className="text-suse-green" />
+                    <h3 className={`text-sm font-bold uppercase tracking-wider text-center ${textSub}`}>Physical Virtualization Layer — SUSE Virtualization (Harvester)</h3>
+                  </div>
+                  <p className={`text-xs text-center mb-4 ${textSub}`}>
+                    {vs.mode === 'pool' ? 'Mixed host inventory' : 'Auto-sized identical hosts'} · {vs.totals.totalHosts} physical host{vs.totals.totalHosts !== 1 ? 's' : ''} total
+                    {vs.ft > 0 ? ` · tolerates ${vs.ft} host failure(s)` : ''} · {vs.totals.threads} threads · {vs.totals.ram} GB RAM{vs.totals.gpus ? ` · ${vs.totals.gpus} GPU` : ''}
+                  </p>
+
+                  {Array.from({ length: vs.sites }).map((_, siteIdx) => (
+                    <div key={siteIdx} className={vs.sites > 1 ? 'mb-4 last:mb-0' : ''}>
+                      {vs.sites > 1 && (
+                        <h4 className={`text-xs font-bold uppercase text-center mb-3 flex items-center justify-center gap-1.5 ${textSub}`}>
+                          <Route size={13} className="text-suse-green" />Site {siteIdx + 1} of {vs.sites} · {totalPerSite} host{totalPerSite !== 1 ? 's' : ''}
+                        </h4>
+                      )}
+                      <div className="flex justify-center flex-wrap gap-4">
+                        {physHosts.map((h, i) => <PhysHostCard key={i} host={h} forPdf={forPdf} />)}
+                        {vs.ext && (
+                          <div className={`rounded-lg shadow-md w-56 flex-shrink-0 overflow-hidden border ${forPdf ? 'bg-white border-gray-300' : 'bg-suse-panel border-suse-border'}`}>
+                            <div className={`font-bold p-2.5 flex items-center text-sm ${forPdf ? 'bg-[#0C322C] text-white' : 'bg-suse-border text-white'}`}><Database size={15} className="mr-2 text-suse-green" />External Storage</div>
+                            <div className={`p-3 space-y-1.5 text-xs ${forPdf ? 'text-[#0C322C]' : 'text-gray-300'}`}>
+                              <div className="flex items-center"><HardDrive size={14} className="mr-2 text-suse-green" />{vs.agg.storage} GB / site</div>
+                              <div className={textSub}>{STORAGE_CONN[state.virtualization.storage.connection] || 'External array'}</div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+
+                  {vs.sites > 1 && (
+                    <p className={`text-[11px] text-center mt-3 ${textSub}`}>
+                      Replicated across {vs.sites} DR sites{state.virtualization.dr.note ? ` — ${state.virtualization.dr.note}` : ''}.
+                    </p>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         );
       }
+
+      const PhysHostCard = ({ host, forPdf }) => (
+        <div className={`rounded-lg shadow-md w-56 flex-shrink-0 overflow-hidden border ${forPdf ? 'bg-white border-gray-300' : 'bg-suse-panel border-suse-border'}`}>
+          <div className={`font-bold p-2.5 flex items-center justify-between text-sm ${forPdf ? 'bg-[#0C322C] text-white' : 'bg-suse-border text-white'}`}>
+            <span className="flex items-center min-w-0"><Server size={15} className="mr-2 text-suse-green flex-shrink-0" /><span className="truncate">{host.name}</span></span>
+            <span className={`ml-2 flex-shrink-0 text-xs font-mono px-1.5 py-0.5 rounded ${forPdf ? 'bg-[#30BA78] text-white' : 'bg-suse-green/20 text-suse-green'}`}>×{host.count}</span>
+          </div>
+          <div className={`p-3 space-y-1.5 text-xs ${forPdf ? 'text-[#0C322C]' : 'text-gray-300'}`}>
+            <div className="flex items-center"><Cpu size={14} className="mr-2 text-suse-green" />{host.cores} cores / {host.threads} threads</div>
+            <div className="flex items-center"><MemoryStick size={14} className="mr-2 text-suse-green" />{host.ram} GB RAM</div>
+            <div className="flex items-center"><HardDrive size={14} className="mr-2 text-suse-green" />{host.storage} GB local</div>
+            {host.gpu ? <div className="flex items-center"><Layers size={14} className="mr-2 text-suse-green" />{host.gpu} GPU</div> : null}
+          </div>
+        </div>
+      );
 
       const NodeCard = ({ title, node, forPdf }) => (
         <div className={`rounded-lg shadow-md w-56 flex-shrink-0 overflow-hidden border ${forPdf ? 'bg-white border-gray-300' : 'bg-suse-panel border-suse-border'}`}>
@@ -1719,7 +1793,7 @@
               <Step n="2" title="Select services">Tick the SUSE AI services you plan to run. Some offer sizing profiles (e.g. Observability scales by cluster size). Add your own workloads under <strong className="text-gray-200">Custom Applications</strong>.</Step>
               <Step n="3" title="Watch the live totals">The sidebar shows total capacity vs. demand and the remaining headroom in real time, flagging GPU deficits automatically.</Step>
               <Step n="4" title="Plan the bare-metal virtualization layer">On the <strong className="text-gray-200">Virtualization</strong> tab, describe one physical SUSE Virtualization (Harvester) host, set overcommit and resiliency policy, and the tool sizes how many hosts are needed to run every cluster node as a VM. Add extra VMs, model an external storage array, or replicate across DR sites.</Step>
-              <Step n="5" title="Review architecture & network">The <strong className="text-gray-200">Architecture</strong> tab renders your cluster visually; <strong className="text-gray-200">Network</strong> lists the firewall rules implied by your selections.</Step>
+              <Step n="5" title="Review architecture & network">The <strong className="text-gray-200">Architecture</strong> tab renders your cluster visually — including the physical SUSE Virtualization host distribution and DR sites underneath it; <strong className="text-gray-200">Network</strong> lists the firewall rules implied by your selections.</Step>
               <Step n="6" title="Export & share">Use the action bar to export a <strong className="text-gray-200">PDF report</strong>, save/load a JSON config, or copy a <strong className="text-gray-200">share link</strong> that encodes the whole configuration in the URL.</Step>
             </Panel>
             <Panel className="p-6">
