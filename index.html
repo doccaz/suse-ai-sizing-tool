@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.1.3";
+      const APP_VERSION = "2.2.0";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -146,11 +146,33 @@
 
       /* ---------------- Data ---------------- */
       const baseComponentData = {
-        controlPlane:       { name: 'Control Plane Nodes',         icon: Server, accent: 'sky',     defaultConfig: { cpu: 8,  ram: 32, storage: 200, gpus: 0 } },
-        gpuWorkerNodes:     { name: 'GPU-Enabled Worker Nodes',    icon: Layers, accent: 'violet',  defaultConfig: { cpu: 16, ram: 32, storage: 250, gpus: 1 } },
-        generalWorkerNodes: { name: 'General Purpose Worker Nodes',icon: Cpu,    accent: 'emerald', defaultConfig: { cpu: 8,  ram: 64, storage: 100, gpus: 0 } },
+        controlPlane:       { name: 'Control Plane Nodes',         icon: Server, accent: 'sky',     defaultProfileId: 'p_small',  defaultConfig: { cpu: 4,  ram: 8,  storage: 100, gpus: 0 } },
+        gpuWorkerNodes:     { name: 'GPU-Enabled Worker Nodes',    icon: Layers, accent: 'violet',  defaultProfileId: 'p_gpu',    defaultConfig: { cpu: 16, ram: 32, storage: 250, gpus: 1 } },
+        generalWorkerNodes: { name: 'General Purpose Worker Nodes',icon: Cpu,    accent: 'emerald', defaultProfileId: 'p_medium', defaultConfig: { cpu: 8,  ram: 32, storage: 200, gpus: 0 } },
       };
       const baseOrder = ['controlPlane', 'gpuWorkerNodes', 'generalWorkerNodes'];
+
+      /* Reusable per-node profiles. Users can edit/add/remove these in the Cluster
+         Sizing tab; a group in "uniform" mode references one by id. This lets a
+         customer balance scale-up (fewer, larger nodes) against scale-out (more,
+         smaller nodes) by changing one profile or the node count. */
+      const defaultProfiles = () => ([
+        { id: 'p_small',  name: 'Small (4c / 8g)',         cpu: 4,  ram: 8,  storage: 100, gpus: 0 },
+        { id: 'p_medium', name: 'Medium (8c / 32g)',       cpu: 8,  ram: 32, storage: 200, gpus: 0 },
+        { id: 'p_large',  name: 'Large (16c / 64g)',       cpu: 16, ram: 64, storage: 500, gpus: 0 },
+        { id: 'p_gpu',    name: 'GPU (16c / 32g / 1 GPU)', cpu: 16, ram: 32, storage: 250, gpus: 1 },
+      ]);
+
+      /* Effective provisioned nodes for a base group: empty when disabled, and
+         padded with `faultTolerance` spare clones of the last node (N+x headroom).
+         Spares are real, provisioned capacity, so they flow into every total. */
+      const effNodes = (g) => {
+        if (!g || g.enabled === false) return [];
+        const ft = Math.max(0, g.faultTolerance || 0);
+        const base = g.nodes[g.nodes.length - 1] || g.nodes[0];
+        if (!ft || !base) return g.nodes;
+        return [...g.nodes, ...Array.from({ length: ft }, (_, i) => ({ ...base, id: `${base.id}-ft${i}`, _spare: true }))];
+      };
 
       const servicesData = {
         suseSecurity:   { name: 'SUSE Security (NeuVector)', icon: NeuVectorIcon, description: "Runtime security: vulnerability scanning, threat detection and container firewalling.", profiles: { default: { name: 'Default', cpu: 4, ram: 4, storage: 20 } } },
@@ -319,6 +341,18 @@
           customVms: Array.isArray(cur.customVms) ? cur.customVms : [],
         };
         if (!Array.isArray(s.customApps)) s.customApps = [];
+        // Node profiles (added v2.2): seed defaults and ensure each base group has
+        // enabled / faultTolerance / profileId fields.
+        if (!Array.isArray(s.nodeProfiles) || !s.nodeProfiles.length) s.nodeProfiles = defaultProfiles();
+        if (s.base && typeof s.base === 'object') {
+          baseOrder.forEach(key => {
+            const g = s.base[key];
+            if (!g || typeof g !== 'object') return;
+            if (g.enabled === undefined) g.enabled = true;
+            if (g.faultTolerance === undefined) g.faultTolerance = 0;
+            if (g.profileId === undefined) g.profileId = baseComponentData[key].defaultProfileId;
+          });
+        }
         return s;
       };
 
@@ -369,14 +403,22 @@
         const [catalogOpen, setCatalogOpen] = useState(false);
         const fileInputRef = useRef(null);
 
-        const makeNodes = (key, count) =>
-          Array.from({ length: count }, () => ({ id: uid(), ...baseComponentData[key].defaultConfig }));
+        const nodeFromProfile = (p) => ({ id: uid(), cpu: p.cpu, ram: p.ram, storage: p.storage, gpus: p.gpus || 0 });
+        const makeProfileNodes = (p, count) => Array.from({ length: count }, () => nodeFromProfile(p));
 
-        const defaultState = () => ({
+        const defaultState = () => {
+          const profs = defaultProfiles();
+          const byId = (id) => profs.find(p => p.id === id);
+          const group = (key, count) => {
+            const pid = baseComponentData[key].defaultProfileId;
+            return { enabled: true, custom: false, profileId: pid, faultTolerance: 0, nodes: makeProfileNodes(byId(pid), count) };
+          };
+          return ({
+          nodeProfiles: profs,
           base: {
-            controlPlane:       { custom: false, nodes: makeNodes('controlPlane', 3) },
-            gpuWorkerNodes:     { custom: true,  nodes: makeNodes('gpuWorkerNodes', 1) },
-            generalWorkerNodes: { custom: false, nodes: makeNodes('generalWorkerNodes', 1) },
+            controlPlane:       group('controlPlane', 3),
+            gpuWorkerNodes:     group('gpuWorkerNodes', 1),
+            generalWorkerNodes: group('generalWorkerNodes', 1),
           },
           services: {
             suseSecurity: { selected: false, profile: 'default' },
@@ -390,6 +432,7 @@
           customApps: [],
           virtualization: defaultVirt(),
         });
+        };
 
         const [state, setState] = useState(() => loadInitialState(defaultState));
 
@@ -405,17 +448,66 @@
           setState(s => ({ ...s, base: { ...s.base, [key]: updater(s.base[key]) } }));
 
         const toggleCustom = (key, v) => setGroup(key, g => ({ ...g, custom: v }));
+        const setGroupEnabled = (key, v) => setGroup(key, g => ({ ...g, enabled: v }));
+        const setFaultTolerance = (key, v) => setGroup(key, g => ({ ...g, faultTolerance: Math.max(0, parseInt(v, 10) || 0) }));
 
-        const setCount = (key, count) => setGroup(key, g => {
+        // The seed config for a group's new nodes: its assigned profile if any, else
+        // the last existing node, else the static defaultConfig fallback.
+        const seedConfig = (s, key, g) => {
+          const p = (s.nodeProfiles || []).find(pr => pr.id === g.profileId);
+          if (p) return { cpu: p.cpu, ram: p.ram, storage: p.storage, gpus: p.gpus || 0 };
+          return g.nodes[g.nodes.length - 1] || baseComponentData[key].defaultConfig;
+        };
+
+        const setCount = (key, count) => setState(s => ({ ...s, base: { ...s.base, [key]: (g => {
           const nodes = [...g.nodes];
-          if (count > nodes.length) for (let i = nodes.length; i < count; i++) nodes.push({ id: uid(), ...baseComponentData[key].defaultConfig });
+          const seed = seedConfig(s, key, g);
+          if (count > nodes.length) for (let i = nodes.length; i < count; i++) nodes.push({ id: uid(), cpu: seed.cpu, ram: seed.ram, storage: seed.storage, gpus: seed.gpus || 0 });
           else nodes.length = Math.max(1, count);
           return { ...g, nodes };
+        })(s.base[key]) } }));
+
+        // Assign a reusable profile to a group (uniform mode) and rewrite every node
+        // in the group to that profile's spec, preserving the node count.
+        const setGroupProfile = (key, profileId) => setState(s => {
+          const p = (s.nodeProfiles || []).find(pr => pr.id === profileId);
+          const g = s.base[key];
+          const nodes = p ? g.nodes.map(n => ({ ...n, cpu: p.cpu, ram: p.ram, storage: p.storage, gpus: p.gpus || 0 })) : g.nodes;
+          return { ...s, base: { ...s.base, [key]: { ...g, profileId, nodes } } };
         });
 
-        const addNode = (key) => setGroup(key, g => ({ ...g, nodes: [...g.nodes, { id: uid(), ...baseComponentData[key].defaultConfig }] }));
+        const addNode = (key) => setState(s => ({ ...s, base: { ...s.base, [key]: (g => {
+          const seed = seedConfig(s, key, g);
+          return { ...g, nodes: [...g.nodes, { id: uid(), cpu: seed.cpu, ram: seed.ram, storage: seed.storage, gpus: seed.gpus || 0 }] };
+        })(s.base[key]) } }));
         const removeNode = (key, id) => setGroup(key, g => ({ ...g, nodes: g.nodes.length > 1 ? g.nodes.filter(n => n.id !== id) : g.nodes }));
         const updateNode = (key, id, field, value) => setGroup(key, g => ({ ...g, nodes: g.nodes.map(n => n.id === id ? { ...n, [field]: Math.max(0, parseInt(value, 10) || 0) } : n) }));
+
+        /* ---- reusable node profiles ---- */
+        const addProfile = () => setState(s => {
+          const id = uid();
+          return { ...s, nodeProfiles: [...(s.nodeProfiles || []), { id, name: 'New profile', cpu: 4, ram: 8, storage: 100, gpus: 0 }] };
+        });
+        // Edit a profile and propagate to every uniform-mode group using it.
+        const updateProfile = (id, field, value) => setState(s => {
+          const v = field === 'name' ? value : Math.max(0, parseInt(value, 10) || 0);
+          const nodeProfiles = (s.nodeProfiles || []).map(p => p.id === id ? { ...p, [field]: v } : p);
+          const p = nodeProfiles.find(pr => pr.id === id);
+          const base = { ...s.base };
+          if (field !== 'name' && p) baseOrder.forEach(key => {
+            const g = base[key];
+            if (g && !g.custom && g.profileId === id) base[key] = { ...g, nodes: g.nodes.map(n => ({ ...n, cpu: p.cpu, ram: p.ram, storage: p.storage, gpus: p.gpus || 0 })) };
+          });
+          return { ...s, nodeProfiles, base };
+        });
+        const removeProfile = (id) => setState(s => {
+          const remaining = (s.nodeProfiles || []).filter(p => p.id !== id);
+          if (!remaining.length) return s; // never delete the last profile
+          const fallback = remaining[0].id;
+          const base = { ...s.base };
+          baseOrder.forEach(key => { if (base[key] && base[key].profileId === id) base[key] = { ...base[key], profileId: fallback }; });
+          return { ...s, nodeProfiles: remaining, base };
+        });
 
         /* ---- services / custom apps ---- */
         const setService = (id, field, value) => setState(s => ({ ...s, services: { ...s.services, [id]: { ...s.services[id], [field]: value } } }));
@@ -440,7 +532,7 @@
           const capacity = blankSummary();
           const demand = blankSummary();
           baseOrder.forEach(key => {
-            state.base[key].nodes.forEach(n => {
+            effNodes(state.base[key]).forEach(n => {
               capacity.cpu += n.cpu; capacity.ram += n.ram; capacity.storage += n.storage; capacity.gpu += (n.gpus || 0);
             });
           });
@@ -456,7 +548,7 @@
             serviceDetails.push({ name: a.name, profile: 'Custom', cpu: a.cpu, ram: a.ram, storage: a.storage, gpu: a.gpu });
           });
           const deltas = { cpu: capacity.cpu - demand.cpu, ram: capacity.ram - demand.ram, storage: capacity.storage - demand.storage, gpu: capacity.gpu - demand.gpu };
-          const counts = { controlPlane: state.base.controlPlane.nodes.length, gpuWorkerNodes: state.base.gpuWorkerNodes.nodes.length, generalWorkerNodes: state.base.generalWorkerNodes.nodes.length };
+          const counts = { controlPlane: effNodes(state.base.controlPlane).length, gpuWorkerNodes: effNodes(state.base.gpuWorkerNodes).length, generalWorkerNodes: effNodes(state.base.generalWorkerNodes).length };
           return { capacity, demand, deltas, serviceDetails, counts };
         }, [state]);
 
@@ -485,7 +577,7 @@
           // Build the VM fleet: every k8s node is a VM, plus custom VMs (expanded by count).
           const vms = [];
           const groupLabels = { controlPlane: 'Control Plane', gpuWorkerNodes: 'GPU Worker', generalWorkerNodes: 'General Worker' };
-          baseOrder.forEach(key => state.base[key].nodes.forEach((n, i) =>
+          baseOrder.forEach(key => effNodes(state.base[key]).forEach((n, i) =>
             vms.push({ name: `${groupLabels[key]} ${i + 1}`, cpu: n.cpu, ram: n.ram, storage: n.storage, gpu: n.gpus || 0 })));
           v.customVms.forEach(cv => {
             const count = Math.max(0, cv.count || 0);
@@ -708,6 +800,8 @@
                 {activeTab === 'sizing' && (
                   <SizingTab state={state} summary={summary}
                     toggleCustom={toggleCustom} setCount={setCount} addNode={addNode} removeNode={removeNode} updateNode={updateNode}
+                    setGroupEnabled={setGroupEnabled} setFaultTolerance={setFaultTolerance} setGroupProfile={setGroupProfile}
+                    addProfile={addProfile} updateProfile={updateProfile} removeProfile={removeProfile}
                     setService={setService} addCustomApp={addCustomApp} updateCustomApp={updateCustomApp} removeCustomApp={removeCustomApp}
                     openCatalog={() => setCatalogOpen(true)} />
                 )}
@@ -777,6 +871,32 @@
                 <h2 className="text-lg font-bold text-white mb-1">Plan your SUSE AI deployment</h2>
                 <p className="text-sm text-gray-400">SUSE AI is an open, secure, enterprise-grade platform for deploying generative AI and LLMs. Configure your cluster below — totals update live in the sidebar.</p>
               </Panel>
+
+              <div>
+                <SectionLabel icon={Settings} right={
+                  <button onClick={props.addProfile} className="text-xs flex items-center text-suse-green hover:text-emerald-300"><Plus size={14} className="mr-1" />Add profile</button>
+                }>Node Profiles</SectionLabel>
+                <Panel className="p-5">
+                  <p className="text-xs text-gray-400 mb-4">Reusable per-node sizes. Assign one to a node group below, then balance scale-up (fewer, larger nodes) against scale-out (more, smaller nodes). Editing a profile updates every group that uses it.</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {(state.nodeProfiles || []).map(p => (
+                      <div key={p.id} className="bg-suse-bg border border-suse-border rounded-md p-3">
+                        <div className="flex items-center justify-between mb-2 gap-2">
+                          <input value={p.name} onChange={(e) => props.updateProfile(p.id, 'name', e.target.value)}
+                            className="bg-suse-panel border border-suse-border rounded px-2 py-1 text-sm font-bold text-gray-100 focus:border-suse-green focus:outline-none w-full" />
+                          {(state.nodeProfiles || []).length > 1 && <button onClick={() => props.removeProfile(p.id)} className="text-red-400 hover:text-red-300 flex-shrink-0"><Trash2 size={15} /></button>}
+                        </div>
+                        <div className="grid grid-cols-4 gap-2">
+                          <NumberField label="vCPU" value={p.cpu} onChange={(v) => props.updateProfile(p.id, 'cpu', v)} />
+                          <NumberField label="RAM GB" value={p.ram} onChange={(v) => props.updateProfile(p.id, 'ram', v)} />
+                          <NumberField label="Stor GB" value={p.storage} onChange={(v) => props.updateProfile(p.id, 'storage', v)} />
+                          <NumberField label="GPUs" value={p.gpus || 0} onChange={(v) => props.updateProfile(p.id, 'gpus', v)} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </Panel>
+              </div>
 
               <div>
                 <SectionLabel icon={Server}>Base Cluster Nodes</SectionLabel>
@@ -850,45 +970,72 @@
         emerald: 'text-suse-green border-suse-green/40',
       };
 
-      function BaseGroup({ groupKey, group, toggleCustom, setCount, addNode, removeNode, updateNode, gpuDemand, gpuDelta }) {
+      function BaseGroup({ groupKey, group, toggleCustom, setCount, addNode, removeNode, updateNode, setGroupEnabled, setFaultTolerance, setGroupProfile, state, gpuDemand, gpuDelta }) {
         const meta = baseComponentData[groupKey];
         const Icon = meta.icon;
         const isGpu = groupKey === 'gpuWorkerNodes';
         const isCp = groupKey === 'controlPlane';
-        const totals = group.nodes.reduce((a, n) => ({ cpu: a.cpu + n.cpu, ram: a.ram + n.ram, storage: a.storage + n.storage, gpus: a.gpus + (n.gpus||0) }), { cpu:0,ram:0,storage:0,gpus:0 });
+        const enabled = group.enabled !== false;
+        const ft = Math.max(0, group.faultTolerance || 0);
+        const profiles = state.nodeProfiles || [];
+        const totals = effNodes(group).reduce((a, n) => ({ cpu: a.cpu + n.cpu, ram: a.ram + n.ram, storage: a.storage + n.storage, gpus: a.gpus + (n.gpus||0) }), { cpu:0,ram:0,storage:0,gpus:0 });
+        const totalNodes = group.nodes.length + (enabled ? ft : 0);
 
         return (
-          <Panel className="p-5">
+          <Panel className={`p-5 ${enabled ? '' : 'opacity-60'}`}>
             <div className="flex items-start justify-between gap-3 mb-4">
               <div className="flex items-center">
                 <div className={`h-9 w-9 rounded-lg bg-suse-bg border flex items-center justify-center mr-3 ${accentMap[meta.accent]}`}><Icon size={18} /></div>
                 <div>
                   <h3 className="font-bold text-white">{meta.name}</h3>
-                  <p className="text-xs text-gray-500">{group.nodes.length} node{group.nodes.length !== 1 ? 's' : ''} · {totals.cpu} vCPU · {totals.ram} GB{totals.gpus ? ` · ${totals.gpus} GPU` : ''}</p>
+                  {enabled ? (
+                    <p className="text-xs text-gray-500">{totalNodes} node{totalNodes !== 1 ? 's' : ''}{ft ? ` (${group.nodes.length}+${ft} FT)` : ''} · {totals.cpu} vCPU · {totals.ram} GB{totals.gpus ? ` · ${totals.gpus} GPU` : ''}</p>
+                  ) : (
+                    <p className="text-xs text-amber-400/80">Disabled — excluded from totals</p>
+                  )}
                 </div>
               </div>
-              <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none whitespace-nowrap">
-                <span>Per-node</span>
-                <input type="checkbox" checked={group.custom} onChange={(e) => toggleCustom(groupKey, e.target.checked)} className="sr-only peer" />
-                <span className="w-9 h-5 bg-suse-bg border border-suse-border rounded-full relative peer-checked:bg-suse-green/30 peer-checked:border-suse-green after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-4 after:h-4 after:rounded-full after:bg-gray-400 peer-checked:after:bg-suse-green after:transition-all peer-checked:after:translate-x-4"></span>
-              </label>
+              <div className="flex items-center gap-3">
+                {/* Enable / disable the whole node group (e.g. CPU-only deployments turn off GPU workers). */}
+                <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none whitespace-nowrap" title="Include this node group in the cluster">
+                  <span>{enabled ? 'On' : 'Off'}</span>
+                  <input type="checkbox" checked={enabled} onChange={(e) => setGroupEnabled(groupKey, e.target.checked)} className="sr-only peer" />
+                  <span className="w-9 h-5 bg-suse-bg border border-suse-border rounded-full relative peer-checked:bg-suse-green/30 peer-checked:border-suse-green after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-4 after:h-4 after:rounded-full after:bg-gray-400 peer-checked:after:bg-suse-green after:transition-all peer-checked:after:translate-x-4"></span>
+                </label>
+                <label className={`flex items-center gap-2 text-xs text-gray-400 select-none whitespace-nowrap ${enabled ? 'cursor-pointer' : 'opacity-50 pointer-events-none'}`}>
+                  <span>Per-node</span>
+                  <input type="checkbox" checked={group.custom} disabled={!enabled} onChange={(e) => toggleCustom(groupKey, e.target.checked)} className="sr-only peer" />
+                  <span className="w-9 h-5 bg-suse-bg border border-suse-border rounded-full relative peer-checked:bg-suse-green/30 peer-checked:border-suse-green after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-4 after:h-4 after:rounded-full after:bg-gray-400 peer-checked:after:bg-suse-green after:transition-all peer-checked:after:translate-x-4"></span>
+                </label>
+              </div>
             </div>
 
-            {!group.custom ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-end">
-                <NumberField label="Number of nodes" value={group.nodes.length} min={1} onChange={(v) => setCount(groupKey, v)} />
+            {!enabled ? null : !group.custom ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
+                  <div className="sm:col-span-1">
+                    <label className="block text-xs text-gray-400 mb-1">Node profile</label>
+                    <select value={group.profileId || ''} onChange={(e) => setGroupProfile(groupKey, e.target.value)}
+                      className="w-full bg-suse-bg border border-suse-border rounded px-2 py-2 text-sm text-gray-200 focus:border-suse-green focus:outline-none">
+                      {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  </div>
+                  <NumberField label="Number of nodes" value={group.nodes.length} min={1} onChange={(v) => setCount(groupKey, v)} />
+                  <NumberField label="Fault tolerance (N + x spares)" value={ft} min={0} onChange={(v) => setFaultTolerance(groupKey, v)} />
+                </div>
                 <div className="bg-suse-bg border border-suse-border rounded-md p-3">
-                  <p className="text-[11px] text-gray-500 mb-1.5">Per node (default profile)</p>
+                  <p className="text-[11px] text-gray-500 mb-1.5">Per node (from profile)</p>
                   <div className="flex flex-wrap gap-2">
-                    <Pill icon={Cpu}>{meta.defaultConfig.cpu} vCPU</Pill>
-                    <Pill icon={MemoryStick}>{meta.defaultConfig.ram} GB</Pill>
-                    <Pill icon={HardDrive}>{meta.defaultConfig.storage} GB</Pill>
-                    {isGpu && <Pill icon={Layers}>{meta.defaultConfig.gpus} GPU</Pill>}
+                    <Pill icon={Cpu}>{group.nodes[0].cpu} vCPU</Pill>
+                    <Pill icon={MemoryStick}>{group.nodes[0].ram} GB</Pill>
+                    <Pill icon={HardDrive}>{group.nodes[0].storage} GB</Pill>
+                    {isGpu && <Pill icon={Layers}>{group.nodes[0].gpus || 0} GPU</Pill>}
                   </div>
                 </div>
               </div>
             ) : (
               <div className="space-y-2">
+                <div className="mb-1"><NumberField label="Fault tolerance (N + x spares)" value={ft} min={0} onChange={(v) => setFaultTolerance(groupKey, v)} /></div>
                 {group.nodes.map((n, i) => (
                   <div key={n.id} className="bg-suse-bg border border-suse-border rounded-md p-3">
                     <div className="flex items-center justify-between mb-2">
@@ -907,13 +1054,13 @@
               </div>
             )}
 
-            {isCp && group.nodes.length < 3 && (
+            {isCp && enabled && totalNodes < 3 && (
               <div className="mt-3 bg-amber-500/10 border border-amber-500/30 text-amber-200 rounded-md p-3 flex items-start text-xs">
                 <AlertTriangle size={16} className="mr-2 mt-0.5 flex-shrink-0" />
                 <div>A minimum of 3 control plane nodes is recommended for etcd quorum and API redundancy in a production HA cluster.</div>
               </div>
             )}
-            {isGpu && (
+            {isGpu && enabled && (
               <div className={`mt-3 rounded-md p-3 flex items-start text-xs border ${gpuDelta >= 0 ? 'bg-suse-green/10 border-suse-green/30 text-suse-green' : 'bg-amber-500/10 border-amber-500/30 text-amber-200'}`}>
                 {gpuDelta >= 0 ? <CheckCircle size={16} className="mr-2 mt-0.5 flex-shrink-0" /> : <AlertTriangle size={16} className="mr-2 mt-0.5 flex-shrink-0" />}
                 <div><strong>GPUs required by services: {gpuDemand}.</strong> Cluster provides {totals.gpus}.{gpuDelta < 0 && ` Deficit of ${Math.abs(gpuDelta)} GPU(s).`}</div>
@@ -1191,7 +1338,7 @@
             <div>
               <h3 className={`text-sm font-bold uppercase tracking-wider text-center mb-3 ${textSub}`}>Control Plane</h3>
               <div className="flex justify-center flex-wrap gap-4">
-                {state.base.controlPlane.nodes.map((n, i) => <NodeCard key={n.id} title={`Control Plane ${i + 1}`} node={n} forPdf={forPdf} />)}
+                {effNodes(state.base.controlPlane).map((n, i) => <NodeCard key={n.id} title={`Control Plane ${i + 1}`} node={n} forPdf={forPdf} />)}
               </div>
             </div>
 
@@ -1216,13 +1363,17 @@
                 <div>
                   <h4 className={`text-xs font-bold uppercase text-center mb-3 ${textSub}`}>GPU-Enabled Workers ({summary.capacity.gpu} GPU total)</h4>
                   <div className="flex justify-center flex-wrap gap-4">
-                    {state.base.gpuWorkerNodes.nodes.map((n, i) => <NodeCard key={n.id} title={`GPU Worker ${i + 1}`} node={n} forPdf={forPdf} />)}
+                    {effNodes(state.base.gpuWorkerNodes).length
+                      ? effNodes(state.base.gpuWorkerNodes).map((n, i) => <NodeCard key={n.id} title={`GPU Worker ${i + 1}`} node={n} forPdf={forPdf} />)
+                      : <span className={`text-xs italic ${textSub}`}>None — GPU workers disabled</span>}
                   </div>
                 </div>
                 <div>
                   <h4 className={`text-xs font-bold uppercase text-center mb-3 ${textSub}`}>General Purpose Workers</h4>
                   <div className="flex justify-center flex-wrap gap-4">
-                    {state.base.generalWorkerNodes.nodes.map((n, i) => <NodeCard key={n.id} title={`GP Worker ${i + 1}`} node={n} forPdf={forPdf} />)}
+                    {effNodes(state.base.generalWorkerNodes).length
+                      ? effNodes(state.base.generalWorkerNodes).map((n, i) => <NodeCard key={n.id} title={`GP Worker ${i + 1}`} node={n} forPdf={forPdf} />)
+                      : <span className={`text-xs italic ${textSub}`}>None — disabled</span>}
                   </div>
                 </div>
               </div>

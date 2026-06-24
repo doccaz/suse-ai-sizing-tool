@@ -22,6 +22,70 @@ over that hand calculation:
 
 ---
 
+## The Cluster Sizing model (Kubernetes layer)
+
+The **Cluster Sizing** tab models the SUSE AI Kubernetes cluster itself. It
+compares **capacity** (what the nodes provide) against **demand** (what the
+selected services and custom apps request) and reports the remaining headroom or
+deficit per resource (vCPU, RAM, storage, GPU).
+
+### Node groups
+
+Nodes are organised into three groups: **control plane**, **GPU-enabled
+workers**, and **general-purpose workers**. Each group is independent and has:
+
+- an **enabled** flag — a disabled group contributes nothing to capacity, the
+  architecture diagram, or the downstream virtualization fleet. This lets a
+  CPU-only deployment switch the GPU worker group off entirely;
+- a **sizing mode** — *uniform* (one profile applied to every node in the group,
+  plus a node count) or *per-node* (each node edited individually for
+  heterogeneous hardware);
+- a **fault-tolerance** value `x` (see *Effective nodes* below).
+
+### Reusable node profiles
+
+A **node profile** is a named per-node size (`cpu`, `ram`, `storage`, `gpus`) —
+e.g. *Small (4c/8g)*, *Medium (8c/32g)*, *Large (16c/64g)*, *GPU
+(16c/32g/1 GPU)*. Profiles are user-editable and a group in uniform mode
+references one. This decouples the two levers a customer must balance:
+
+- **scale-up** — assign a larger profile (fewer, bigger nodes);
+- **scale-out** — raise the node count (more, smaller nodes).
+
+Editing a profile propagates to every uniform-mode group that uses it. The
+default control-plane profile is *Small* (**4 vCPU / 8 GB**), a deliberately
+lean starting point for a control plane that runs etcd and the API server rather
+than application workloads; scale it up for large or high-churn clusters.
+
+### Effective nodes and fault tolerance (N + x)
+
+Capacity is summed over each group's **effective nodes**:
+
+```
+effective_nodes(group) =
+    []                                         if group disabled
+    group.nodes                                if fault_tolerance x = 0
+    group.nodes + x spare clones of the node   otherwise
+```
+
+The `x` spare nodes are **N + x** resiliency headroom: real, provisioned
+capacity sized so the group keeps running the full workload through `x`
+simultaneous node failures. Spares are clones of the group's node profile and
+are counted in every total (shown as e.g. `4 nodes (3+1 FT)`). The control-plane
+quorum guidance (≥ 3 nodes for etcd) is evaluated against the effective count, so
+configuring `2 + 1` satisfies it.
+
+```
+capacity.cpu = Σ_groups Σ_(n ∈ effective_nodes(group)) n.cpu      (and ram / storage / gpu)
+demand.cpu   = Σ_(selected services) p.cpu + Σ_(custom apps) a.cpu
+delta.cpu    = capacity.cpu − demand.cpu                          (negative ⇒ deficit)
+```
+
+These effective nodes are exactly the set handed to the **Virtualization** model
+below — each becomes one VM (see §2).
+
+---
+
 ## 1. Terminology and units
 
 | Term | Meaning |
@@ -43,12 +107,15 @@ is the resource that physically constrains placement.
 
 ## 2. The VM fleet
 
-Every Kubernetes node defined in the **Cluster Sizing** tab becomes exactly one
+Every *effective* Kubernetes node from the **Cluster Sizing** tab (i.e. nodes of
+enabled groups, including any N + x fault-tolerance spares) becomes exactly one
 virtual machine on the virtualization layer:
 
 - Control-plane nodes → control-plane VMs
 - GPU worker nodes → GPU VMs
 - General-purpose worker nodes → worker VMs
+
+Disabled node groups contribute no VMs.
 
 To this we add any **custom VMs** declared on the Virtualization tab (e.g.
 Rancher management cluster, registry, bastion, load balancers), each expanded by

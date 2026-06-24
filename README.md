@@ -17,7 +17,9 @@ The SUSE AI Sizing Architect lets you model a cluster, attach SUSE AI services a
 
 ## Features
 
-- **Base node sizing** — control plane plus GPU and general-purpose worker groups, with sensible SUSE-recommended defaults.
+- **Base node sizing** — control plane plus GPU and general-purpose worker groups, with sensible SUSE-recommended defaults. Each group can be **enabled or disabled** independently, so a CPU-only deployment can simply switch the GPU worker group off and have it drop out of every total.
+- **Reusable node profiles** — define named per-node sizes (Small / Medium / Large / GPU, or your own) once and assign one to a group from a dropdown. This makes it easy to balance **scale-up** (fewer, larger nodes) against **scale-out** (more, smaller nodes): change the profile or the node count and the totals update instantly. Editing a profile propagates to every group that uses it.
+- **Per-group fault tolerance** — add **N + x spare nodes** to any group to provision HA headroom; the spares are cloned from the group's profile and counted in all capacity totals (e.g. `4 nodes (3+1 FT)`).
 - **Per-node configuration** — flip any group into per-node mode to give individual nodes distinct CPU / RAM / storage / GPU values, and add or remove nodes freely.
 - **SUSE AI services** — NeuVector (Security), Longhorn (Storage), Private Registry, Milvus, Ollama, Open WebUI and Observability, several with selectable sizing profiles.
 - **Custom applications** — add arbitrary workloads so their resource demand is folded into every total.
@@ -77,7 +79,7 @@ Two constants at the top of the `<script>` block in `index.html` are meant to be
 
 ```js
 const GITHUB_URL  = "https://github.com/doccaz/suse-ai-sizing-tool"; // "Fork on GitHub" ribbon
-const APP_VERSION = "2.0.0";                                          // shown in footer & About
+const APP_VERSION = "2.2.0";                                          // shown in footer & About
 ```
 
 ## Project structure
@@ -108,6 +110,7 @@ The commit history tracks the evolution of the tool from its first app.new scaff
 | 2025-08-08 | Individual nodes | Full per-node configuration across all groups |
 | 2026-06-14 | **v2.0.0** | Dark SUSE-themed UI, unified features, save/share, GitHub Pages CI |
 | 2026-06-23 | **v2.1.0** | Virtualization tab: bare-metal SUSE Virtualization (Harvester) host sizing — multiple host types (auto & mixed-inventory modes), automatic GPU VM pinning, overcommit, fault tolerance, optional hypervisor reservation, external storage and DR; documented in METHODOLOGY.md |
+| 2026-06-24 | **v2.2.0** | Cluster Sizing: reusable named node profiles (scale-up vs scale-out), enable/disable any node group (CPU-only deployments), per-group N+x fault tolerance, and a lower control-plane default (4c/8g) |
 
 ## Disclaimer
 
