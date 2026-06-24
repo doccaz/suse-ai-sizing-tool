@@ -73,7 +73,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.0.0";
+      const APP_VERSION = "2.1.0";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -107,6 +107,8 @@
       const Edit3 = I(<><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></>);
       const MapIcon = I(<><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></>);
       const Network = I(<><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/></>);
+      const Boxes = I(<><path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19v-5.5l-5-3-4.03 2.42Z"/><path d="m7 16.5-4.74-2.85"/><path d="m7 16.5 5-3"/><path d="M7 16.5v5.17"/><path d="M12 13.5V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10.5l-5 3Z"/><path d="m17 16.5-5-3"/><path d="m17 16.5 4.74-2.85"/><path d="M17 16.5v5.17"/><path d="M7.97 4.42A2 2 0 0 0 7 6.13v4.37l5 3 5-3V6.13a2 2 0 0 0-.97-1.71l-3-1.8a2 2 0 0 0-2.06 0l-3 1.8Z"/><path d="M12 8 7.26 5.15"/><path d="m12 8 4.74-2.85"/><path d="M12 13.5V8"/></>);
+      const Route = I(<><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></>);
       const ClipboardList = I(<><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></>);
       const HelpCircle = I(<><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></>);
       const Link2 = I(<><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></>);
@@ -256,6 +258,7 @@
 
       const TABS = [
         { id: 'sizing',  label: 'Cluster Sizing',   icon: Sliders },
+        { id: 'virt',    label: 'Virtualization',   icon: Boxes },
         { id: 'diagram', label: 'Architecture',     icon: MapIcon },
         { id: 'network', label: 'Network',          icon: Network },
         { id: 'summary', label: 'Summary',          icon: ClipboardList },
@@ -265,6 +268,58 @@
 
       const uid = () => Math.random().toString(36).slice(2, 9);
       const blankSummary = () => ({ cpu: 0, ram: 0, storage: 0, gpu: 0 });
+
+      /* Default config for the Virtualization (SUSE Virtualization / Harvester) tab.
+         Host defaults mirror a typical 2-socket bare-metal node; the spreadsheet's
+         reference host was "2 * 24 cores + Hyperthreading = 96 vCPU, 8 * 64 = 512 GB". */
+      const defaultHostType = (i = 1) => ({
+        id: uid(), name: `Host Type ${i}`, count: 1, primary: i === 1,
+        sockets: 2, coresPerSocket: 24, threadsPerCore: 2, ram: 512, storage: 7680, gpus: 1,
+        reserveRam: 0, reserveThreads: 0,            // hypervisor / OS reservation (best practice, default 0 = spreadsheet parity)
+      });
+      const defaultVirt = () => ({
+        mode: 'auto',                               // 'auto' = size N identical hosts; 'pool' = check a mixed inventory
+        hosts: [ defaultHostType(1) ],
+        overcommit: { vcpu: 1, ram: 1 },            // vCPU/RAM overcommit applied to NON-GPU VMs only; GPU VMs stay 1:1
+        cluster: { maxVmsPerNode: 40, faultTolerance: 2, replication: 3, decidedNodes: 0 }, // decidedNodes 0 = auto
+        storage: { external: false, connection: 'iscsi', capacityNote: '' },
+        dr: { sites: 1, note: '' },
+        customVms: [],                              // { id, name, count, cpu, ram, storage, gpu }
+      });
+
+      const STORAGE_CONN = {
+        fc:    'Fibre Channel SAN',
+        iscsi: 'iSCSI SAN',
+        das:   'Direct-attached LUNs / DAS',
+        csi:   'External CSI driver',
+        nfs:   'NFS / file share',
+      };
+
+      // Fill in any top-level keys missing from older saved/imported configs.
+      const migrateState = (s) => {
+        if (!s || typeof s !== 'object') return s;
+        const d = defaultVirt();
+        const cur = s.virtualization || {};
+        const tpl = defaultHostType(1);
+        let hosts = Array.isArray(cur.hosts) ? cur.hosts : null;
+        if (!hosts) {
+          // pre-2.1 single-host shape → wrap into a one-element host-type list
+          hosts = cur.host ? [{ ...tpl, ...cur.host, id: uid(), name: 'Host Type 1', count: 1, primary: true }] : d.hosts;
+        }
+        hosts = hosts.map((h, i) => ({ ...tpl, ...h, id: h.id || uid(), name: h.name || `Host Type ${i + 1}`, primary: !!h.primary }));
+        if (!hosts.some(h => h.primary)) hosts[0].primary = true;
+        s.virtualization = {
+          mode: cur.mode === 'pool' ? 'pool' : 'auto',
+          hosts,
+          overcommit: { ...d.overcommit, ...cur.overcommit },
+          cluster: { ...d.cluster, ...cur.cluster },
+          storage: { ...d.storage, ...cur.storage },
+          dr: { ...d.dr, ...cur.dr },
+          customVms: Array.isArray(cur.customVms) ? cur.customVms : [],
+        };
+        if (!Array.isArray(s.customApps)) s.customApps = [];
+        return s;
+      };
 
       /* ---------------- Small UI primitives ---------------- */
       const Panel = ({ children, className = "" }) => (
@@ -332,6 +387,7 @@
             observability: { selected: false, profile: '20_ha' },
           },
           customApps: [],
+          virtualization: defaultVirt(),
         });
 
         const [state, setState] = useState(() => loadInitialState(defaultState));
@@ -366,6 +422,18 @@
         const updateCustomApp = (id, field, value) => setState(s => ({ ...s, customApps: s.customApps.map(a => a.id === id ? { ...a, [field]: field === 'name' ? value : Math.max(0, parseInt(value, 10) || 0) } : a) }));
         const removeCustomApp = (id) => setState(s => ({ ...s, customApps: s.customApps.filter(a => a.id !== id) }));
 
+        /* ---- virtualization tab ---- */
+        const setVirtSection = (section, field, value) =>
+          setState(s => ({ ...s, virtualization: { ...s.virtualization, [section]: { ...s.virtualization[section], [field]: value } } }));
+        const setVirtMode = (mode) => setState(s => ({ ...s, virtualization: { ...s.virtualization, mode } }));
+        const addHost = () => setState(s => { const v = s.virtualization; return { ...s, virtualization: { ...v, hosts: [...v.hosts, defaultHostType(v.hosts.length + 1)] } }; });
+        const updateHost = (id, field, value) => setState(s => ({ ...s, virtualization: { ...s.virtualization, hosts: s.virtualization.hosts.map(h => h.id === id ? { ...h, [field]: field === 'name' ? value : Math.max(0, parseInt(value, 10) || 0) } : h) } }));
+        const removeHost = (id) => setState(s => { const v = s.virtualization; if (v.hosts.length <= 1) return s; let hosts = v.hosts.filter(h => h.id !== id); if (!hosts.some(h => h.primary)) hosts = hosts.map((h, i) => i === 0 ? { ...h, primary: true } : h); return { ...s, virtualization: { ...v, hosts } }; });
+        const setPrimaryHost = (id) => setState(s => ({ ...s, virtualization: { ...s.virtualization, hosts: s.virtualization.hosts.map(h => ({ ...h, primary: h.id === id })) } }));
+        const addVirtVm = () => setState(s => ({ ...s, virtualization: { ...s.virtualization, customVms: [...s.virtualization.customVms, { id: uid(), name: 'Custom VM', count: 1, cpu: 4, ram: 8, storage: 100, gpu: 0 }] } }));
+        const updateVirtVm = (id, field, value) => setState(s => ({ ...s, virtualization: { ...s.virtualization, customVms: s.virtualization.customVms.map(v => v.id === id ? { ...v, [field]: field === 'name' ? value : Math.max(0, parseInt(value, 10) || 0) } : v) } }));
+        const removeVirtVm = (id) => setState(s => ({ ...s, virtualization: { ...s.virtualization, customVms: s.virtualization.customVms.filter(v => v.id !== id) } }));
+
         /* ---- derived summary ---- */
         const summary = useMemo(() => {
           const capacity = blankSummary();
@@ -380,7 +448,7 @@
             if (!cfg.selected) return;
             const p = servicesData[id].profiles[cfg.profile];
             demand.cpu += p.cpu; demand.ram += p.ram; demand.storage += p.storage; demand.gpu += (p.gpu || 0);
-            serviceDetails.push({ name: servicesData[id].name, profile: p.name, ...p });
+            serviceDetails.push({ ...p, name: servicesData[id].name, profile: p.name });
           });
           state.customApps.forEach(a => {
             demand.cpu += a.cpu; demand.ram += a.ram; demand.storage += a.storage; demand.gpu += (a.gpu || 0);
@@ -389,6 +457,157 @@
           const deltas = { cpu: capacity.cpu - demand.cpu, ram: capacity.ram - demand.ram, storage: capacity.storage - demand.storage, gpu: capacity.gpu - demand.gpu };
           const counts = { controlPlane: state.base.controlPlane.nodes.length, gpuWorkerNodes: state.base.gpuWorkerNodes.nodes.length, generalWorkerNodes: state.base.generalWorkerNodes.nodes.length };
           return { capacity, demand, deltas, serviceDetails, counts };
+        }, [state]);
+
+        /* ---- virtualization / hypervisor sizing ----
+           Each Kubernetes node defined in the Cluster Sizing tab is treated as one VM
+           placed on the bare-metal SUSE Virtualization (Harvester) hosts, plus any
+           custom VMs added here. Builds on the "Harvester" sheet of the reference
+           spreadsheet, with two refinements vs. the hand calculation:
+             1. GPU VMs are never CPU/RAM-overcommitted (they pin physical resources);
+                overcommit applies only to non-GPU VMs. All demand is therefore
+                normalised to *physical* threads / GB.
+             2. Hosts are a list of types. "auto" mode sizes N identical primary hosts;
+                "pool" mode capacity-checks a mixed inventory, reserving the FT largest
+                hosts for failure. See METHODOLOGY.md for formulas and references. */
+        const virtSummary = useMemo(() => {
+          const v = state.virtualization;
+          const vcpuRatio = Math.max(0.1, v.overcommit.vcpu || 1);
+          const ramRatio = Math.max(0.1, v.overcommit.ram || 1);
+          const ext = v.storage.external;
+          const repl = Math.max(1, v.cluster.replication);
+          const ft = Math.max(0, v.cluster.faultTolerance);
+          const sites = Math.max(1, v.dr.sites);
+          const maxVmsPerNode = Math.max(1, v.cluster.maxVmsPerNode);
+          const ceil = (a, b) => (b > 0 ? Math.ceil(a / b) : 0);
+
+          // Build the VM fleet: every k8s node is a VM, plus custom VMs (expanded by count).
+          const vms = [];
+          const groupLabels = { controlPlane: 'Control Plane', gpuWorkerNodes: 'GPU Worker', generalWorkerNodes: 'General Worker' };
+          baseOrder.forEach(key => state.base[key].nodes.forEach((n, i) =>
+            vms.push({ name: `${groupLabels[key]} ${i + 1}`, cpu: n.cpu, ram: n.ram, storage: n.storage, gpu: n.gpus || 0 })));
+          v.customVms.forEach(cv => {
+            const count = Math.max(0, cv.count || 0);
+            for (let i = 0; i < count; i++) vms.push({ name: count > 1 ? `${cv.name} ${i + 1}` : cv.name, cpu: cv.cpu, ram: cv.ram, storage: cv.storage, gpu: cv.gpu || 0 });
+          });
+
+          // Aggregate, splitting GPU vs non-GPU so GPU VMs can be kept at 1:1.
+          const agg = { vms: vms.length, cpu: 0, ram: 0, storage: 0, gpu: 0, gpuVms: 0,
+                        maxCpu: 0, maxRam: 0, maxStorage: 0, maxGpu: 0,
+                        gpuVcpu: 0, nonGpuVcpu: 0, gpuRam: 0, nonGpuRam: 0 };
+          vms.forEach(m => {
+            agg.cpu += m.cpu; agg.ram += m.ram; agg.storage += m.storage; agg.gpu += m.gpu;
+            agg.maxCpu = Math.max(agg.maxCpu, m.cpu); agg.maxRam = Math.max(agg.maxRam, m.ram);
+            agg.maxStorage = Math.max(agg.maxStorage, m.storage); agg.maxGpu = Math.max(agg.maxGpu, m.gpu);
+            if (m.gpu > 0) { agg.gpuVms++; agg.gpuVcpu += m.cpu; agg.gpuRam += m.ram; }
+            else { agg.nonGpuVcpu += m.cpu; agg.nonGpuRam += m.ram; }
+          });
+
+          // Demand normalised to PHYSICAL host units. GPU VMs 1:1; non-GPU divided by overcommit.
+          const demand = {
+            cpu: agg.gpuVcpu + agg.nonGpuVcpu / vcpuRatio,   // physical threads
+            ram: agg.gpuRam + agg.nonGpuRam / ramRatio,      // physical GB
+            storage: ext ? 0 : agg.storage * repl,
+            gpu: agg.gpu,
+          };
+          // Largest single VM's physical footprint (the "must fit one host" rule).
+          let maxVmThreads = 0, maxVmRam = 0;
+          vms.forEach(m => {
+            maxVmThreads = Math.max(maxVmThreads, m.gpu > 0 ? m.cpu : m.cpu / vcpuRatio);
+            maxVmRam = Math.max(maxVmRam, m.gpu > 0 ? m.ram : m.ram / ramRatio);
+          });
+
+          // Per-host-type physical capacity (after hypervisor/OS reservation).
+          const capOf = (h) => {
+            const threads = Math.max(1, h.sockets * h.coresPerSocket * h.threadsPerCore);
+            return { id: h.id, name: h.name, count: Math.max(0, h.count || 0),
+                     cores: h.sockets * h.coresPerSocket, threads,
+                     cpu: Math.max(0, threads - (h.reserveThreads || 0)),
+                     ram: Math.max(0, h.ram - (h.reserveRam || 0)), rawRam: h.ram,
+                     storage: h.storage, gpu: h.gpus };
+          };
+          const hostCaps = v.hosts.map(capOf);
+          const primaryHost = v.hosts.find(h => h.primary) || v.hosts[0];
+          const primary = hostCaps.find(h => h.id === primaryHost.id) || hostCaps[0];
+
+          let result;
+          if (v.mode === 'pool') {
+            // Heterogeneous inventory: aggregate capacity; reserve the FT largest hosts (worst case) per resource.
+            const units = [];
+            hostCaps.forEach(h => { for (let i = 0; i < h.count; i++) units.push(h); });
+            const totalHosts = units.length;
+            const survSum = (sel) => {
+              const vals = units.map(sel).sort((a, b) => b - a);
+              const total = vals.reduce((s, x) => s + x, 0);
+              const dropped = vals.slice(0, ft).reduce((s, x) => s + x, 0);
+              return { total, surviving: Math.max(0, total - dropped) };
+            };
+            const cpu = survSum(h => h.cpu), ram = survSum(h => h.ram), storage = survSum(h => h.storage), gpu = survSum(h => h.gpu);
+            const vmsCap = { total: totalHosts * maxVmsPerNode, surviving: Math.max(0, totalHosts - ft) * maxVmsPerNode };
+            const checksPool = {
+              cpu: demand.cpu <= cpu.surviving,
+              ram: demand.ram <= ram.surviving,
+              storage: ext || demand.storage <= storage.surviving,
+              gpu: demand.gpu <= gpu.surviving,
+              vms: agg.vms <= vmsCap.surviving,
+            };
+            const feasible = totalHosts > ft && Object.values(checksPool).every(Boolean);
+            result = { mode: 'pool', totalHosts, cap: { cpu, ram, storage, gpu, vms: vmsCap }, checksPool, feasible };
+          } else {
+            // Auto: how many identical primary hosts are needed.
+            const H = primary;
+            const min = {
+              vms: ceil(agg.vms, maxVmsPerNode),
+              cpu: ceil(demand.cpu, H.cpu),
+              ram: ceil(demand.ram, H.ram),
+              storage: ext ? 0 : ceil(demand.storage, H.storage),
+              gpu: H.gpu > 0 ? ceil(demand.gpu, H.gpu) : 0,
+            };
+            const gpuInfeasible = demand.gpu > 0 && H.gpu === 0;
+            const minNodes = Math.max(1, min.vms, min.cpu, min.ram, min.storage, min.gpu);
+            const requiredNodes = minNodes + ft;
+            const decided = v.cluster.decidedNodes > 0 ? v.cluster.decidedNodes : requiredNodes;
+            const failDenom = decided - ft;
+            const perNode = (d) => d > 0 ? { vms: ceil(agg.vms, d), cpu: ceil(demand.cpu, d), ram: ceil(demand.ram, d), storage: ext ? 0 : ceil(demand.storage, d) } : null;
+            const normal = perNode(decided), failure = perNode(failDenom);
+            const util = normal ? {
+              cpu: H.cpu ? Math.round(100 * normal.cpu / H.cpu) : 0,
+              ram: H.ram ? Math.round(100 * normal.ram / H.ram) : 0,
+              storage: (!ext && H.storage) ? Math.round(100 * normal.storage / H.storage) : 0,
+            } : null;
+            result = { mode: 'auto', H, min, minNodes, requiredNodes, decided, failDenom, normal, failure, util,
+                       gpuInfeasible, autoNodes: v.cluster.decidedNodes === 0 };
+          }
+
+          // Largest host (for "fits one host" rule, mode-aware).
+          const biggest = (sel) => hostCaps.reduce((m, h) => (v.mode === 'pool' ? h.count > 0 : h.id === primary.id) ? Math.max(m, sel(h)) : m, 0);
+          const bigHost = { cpu: biggest(h => h.cpu), ram: biggest(h => h.ram), storage: biggest(h => h.storage), gpu: biggest(h => h.gpu) };
+          const checks = [
+            { label: `A single host can schedule the largest VM (needs ${Math.ceil(maxVmThreads)} threads)`, ok: bigHost.cpu >= maxVmThreads },
+            { label: `A single host can hold the largest VM's RAM (needs ${Math.ceil(maxVmRam)} GB)`, ok: bigHost.ram >= maxVmRam },
+            { label: ext ? 'Largest volume served by external storage' : `A single host can hold the largest volume (${agg.maxStorage} GB, no volume striping)`, ok: ext || bigHost.storage >= agg.maxStorage },
+            { label: agg.gpu > 0 ? `A GPU host can place the largest GPU VM (${agg.maxGpu} GPU)` : 'No GPU VMs to place', ok: agg.gpu === 0 || bigHost.gpu >= agg.maxGpu },
+          ];
+          if (v.mode === 'pool') checks.push({ label: `Inventory still runs the full load after ${ft} host failure(s)`, ok: result.feasible });
+          else checks.push({ label: `Cluster survives ${ft} simultaneous host failure(s) with a spare for upgrades`, ok: result.failDenom >= 1 && !!result.failure && result.failure.cpu <= result.H.cpu && result.failure.ram <= result.H.ram && (ext || result.failure.storage <= result.H.storage) });
+
+          // Provisioned totals (× DR sites).
+          let totals;
+          if (v.mode === 'pool') {
+            const sum = (sel) => hostCaps.reduce((s, h) => s + h.count * sel(h), 0);
+            totals = { perSiteHosts: result.totalHosts, totalHosts: result.totalHosts * sites,
+                       cores: sum(h => h.cores) * sites, threads: sum(h => h.threads) * sites,
+                       ram: sum(h => h.rawRam) * sites, storage: ext ? 0 : sum(h => h.storage) * sites, gpus: sum(h => h.gpu) * sites };
+          } else {
+            const H = result.H, hc = v.hosts.find(x => x.id === H.id) || v.hosts[0];
+            totals = { perSiteHosts: result.decided, totalHosts: result.decided * sites,
+                       cores: result.decided * H.cores * sites, threads: result.decided * H.threads * sites,
+                       ram: result.decided * hc.ram * sites, storage: ext ? 0 : result.decided * hc.storage * sites, gpus: result.decided * hc.gpu * sites };
+          }
+          const externalStorageNeeded = ext ? agg.storage * sites : 0;
+
+          return { ...result, agg, demand, ext, repl, ft, sites, vcpuRatio, ramRatio,
+                   maxVmThreads, maxVmRam, checks, totals, externalStorageNeeded, hostCaps, primary };
         }, [state]);
 
         const activeNetworkRules = useMemo(() => {
@@ -415,7 +634,7 @@
           const file = e.target.files[0]; if (!file) return;
           const reader = new FileReader();
           reader.onload = (ev) => {
-            try { const parsed = JSON.parse(ev.target.result); if (parsed.base && parsed.services) { setState(parsed); showToast("Configuration imported"); } else showToast("Invalid config file"); }
+            try { const parsed = JSON.parse(ev.target.result); if (parsed.base && parsed.services) { setState(migrateState(parsed)); showToast("Configuration imported"); } else showToast("Invalid config file"); }
             catch (err) { showToast("Could not parse file"); }
           };
           reader.readAsText(file); e.target.value = '';
@@ -425,7 +644,7 @@
           setBusy(true);
           try {
             await ensurePdfLibs();
-            await generatePdfReport(summary, activeNetworkRules);
+            await generatePdfReport(summary, activeNetworkRules, virtSummary, state.virtualization);
             showToast("PDF report generated");
           } catch (e) {
             console.error(e);
@@ -490,6 +709,12 @@
                     toggleCustom={toggleCustom} setCount={setCount} addNode={addNode} removeNode={removeNode} updateNode={updateNode}
                     setService={setService} addCustomApp={addCustomApp} updateCustomApp={updateCustomApp} removeCustomApp={removeCustomApp}
                     openCatalog={() => setCatalogOpen(true)} />
+                )}
+                {activeTab === 'virt' && (
+                  <VirtualizationTab virt={state.virtualization} vs={virtSummary}
+                    setVirtSection={setVirtSection} setVirtMode={setVirtMode}
+                    addHost={addHost} updateHost={updateHost} removeHost={removeHost} setPrimaryHost={setPrimaryHost}
+                    addVirtVm={addVirtVm} updateVirtVm={updateVirtVm} removeVirtVm={removeVirtVm} />
                 )}
                 {activeTab === 'diagram' && <DiagramTab state={state} summary={summary} />}
                 {activeTab === 'network' && <NetworkTab rules={activeNetworkRules} />}
@@ -1145,6 +1370,343 @@
         </div>
       );
 
+      /* =====================================================================
+         VIRTUALIZATION TAB — bare-metal SUSE Virtualization (Harvester) sizing
+      ===================================================================== */
+      const VToggle = ({ label, checked, onChange }) => (
+        <button onClick={() => onChange(!checked)}
+          className={`flex items-center justify-between w-full text-left px-3 py-2 rounded-md border transition-colors ${checked ? 'bg-suse-green/10 border-suse-green/40 text-suse-green' : 'bg-suse-bg border-suse-border text-gray-300 hover:border-suse-green/40'}`}>
+          <span className="text-sm">{label}</span>
+          <span className={`w-9 h-5 rounded-full flex items-center px-0.5 transition-colors ${checked ? 'bg-suse-green justify-end' : 'bg-suse-border justify-start'}`}>
+            <span className="w-4 h-4 rounded-full bg-white block" />
+          </span>
+        </button>
+      );
+      const VDecimal = ({ label, value, step = 0.5, min = 0.1, onChange }) => (
+        <div>
+          {label && <label className="block text-xs text-gray-400 mb-1">{label}</label>}
+          <input type="number" step={step} min={0} value={value}
+            onChange={(e) => onChange(Math.max(min, parseFloat(e.target.value) || min))}
+            className="w-full bg-suse-bg border border-suse-border rounded text-center text-sm text-gray-100 py-1.5 focus:outline-none focus:border-suse-green font-mono" />
+        </div>
+      );
+      const VTextField = ({ value, placeholder, onChange, className = "" }) => (
+        <input type="text" value={value} placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value)}
+          className={`bg-suse-bg border border-suse-border rounded text-sm text-gray-100 px-2.5 py-1.5 focus:outline-none focus:border-suse-green ${className}`} />
+      );
+      const VResultRow = ({ label, value, sub, tone }) => (
+        <div className="flex items-center justify-between py-1.5 border-b border-suse-border/50 last:border-0">
+          <span className="text-sm text-gray-400">{label}</span>
+          <span className="text-right">
+            <span className={`font-mono font-bold ${tone === 'bad' ? 'text-red-300' : tone === 'good' ? 'text-suse-green' : 'text-white'}`}>{value}</span>
+            {sub != null && <span className="block text-[10px] text-gray-500 font-mono">{sub}</span>}
+          </span>
+        </div>
+      );
+
+      function HostCard({ host, mode, cap, canRemove, onUpdate, onRemove, onPrimary }) {
+        return (
+          <Panel className={`p-4 ${host.primary && mode === 'auto' ? 'border-suse-green/50' : ''}`}>
+            <div className="flex items-center gap-2 mb-3">
+              <Server size={16} className="text-suse-green flex-shrink-0" />
+              <VTextField value={host.name} placeholder="Host type" onChange={v => onUpdate(host.id, 'name', v)} className="flex-1 font-medium" />
+              {mode === 'auto' && (
+                <button onClick={() => onPrimary(host.id)}
+                  className={`text-[11px] px-2 py-1 rounded border whitespace-nowrap ${host.primary ? 'bg-suse-green/15 border-suse-green/50 text-suse-green' : 'border-suse-border text-gray-400 hover:text-suse-green'}`}>
+                  {host.primary ? '● Building block' : 'Use as block'}
+                </button>
+              )}
+              {canRemove && <button onClick={() => onRemove(host.id)} className="text-gray-500 hover:text-red-400 px-1"><Trash2 size={16} /></button>}
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+              <NumberField label="Sockets" min={1} value={host.sockets} onChange={v => onUpdate(host.id, 'sockets', v)} />
+              <NumberField label="Cores / socket" min={1} value={host.coresPerSocket} onChange={v => onUpdate(host.id, 'coresPerSocket', v)} />
+              <NumberField label="Threads / core" min={1} value={host.threadsPerCore} onChange={v => onUpdate(host.id, 'threadsPerCore', v)} />
+              <NumberField label="RAM (GB)" min={1} value={host.ram} onChange={v => onUpdate(host.id, 'ram', v)} />
+              <NumberField label="Storage (GB)" min={0} value={host.storage} onChange={v => onUpdate(host.id, 'storage', v)} />
+              <NumberField label="GPUs" min={0} value={host.gpus} onChange={v => onUpdate(host.id, 'gpus', v)} />
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mt-2">
+              {mode === 'pool' && <NumberField label="Quantity available" min={0} value={host.count} onChange={v => onUpdate(host.id, 'count', v)} />}
+              <NumberField label="Reserve RAM (GB)" min={0} value={host.reserveRam} onChange={v => onUpdate(host.id, 'reserveRam', v)} />
+              <NumberField label="Reserve threads" min={0} value={host.reserveThreads} onChange={v => onUpdate(host.id, 'reserveThreads', v)} />
+            </div>
+            {cap && (
+              <div className="flex flex-wrap gap-1.5 mt-3">
+                <Pill icon={Cpu} tone="green">{cap.cores} cores · {cap.threads} threads</Pill>
+                <Pill icon={Cpu} tone="gray">{cap.cpu} schedulable</Pill>
+                <Pill icon={MemoryStick} tone="gray">{cap.ram} GB usable</Pill>
+                {cap.gpu > 0 && <Pill icon={Layers} tone="gray">{cap.gpu} GPU</Pill>}
+              </div>
+            )}
+          </Panel>
+        );
+      }
+
+      function VirtualizationTab({ virt, vs, setVirtSection, setVirtMode, addHost, updateHost, removeHost, setPrimaryHost, addVirtVm, updateVirtVm, removeVirtVm }) {
+        const oc = virt.overcommit, cl = virt.cluster, st = virt.storage, dr = virt.dr;
+        const capById = (id) => vs.hostCaps.find(c => c.id === id);
+        const capRow = (label, dem, c, unit = '') => (
+          <VResultRow label={label}
+            value={`${Math.ceil(dem).toLocaleString('en-US')} / ${Math.round(c.surviving).toLocaleString('en-US')}${unit}`}
+            sub={`pool total ${Math.round(c.total).toLocaleString('en-US')}${unit}`}
+            tone={dem <= c.surviving ? 'good' : 'bad'} />
+        );
+        return (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* ---------------- Inputs ---------------- */}
+            <div className="lg:col-span-2 space-y-6">
+              <Panel className="p-5">
+                <h2 className="text-lg font-bold text-white mb-1">SUSE Virtualization (bare-metal) planning</h2>
+                <p className="text-sm text-gray-400 mb-4">Size the physical SUSE Virtualization (Harvester) hosts that will run your SUSE AI cluster. Every Kubernetes node from the <strong className="text-gray-300">Cluster Sizing</strong> tab is treated as a VM; add any extra VMs below. GPU-bound VMs are pinned 1:1 (never overcommitted). See <a href={`${GITHUB_URL}/blob/main/METHODOLOGY.md`} target="_blank" rel="noopener noreferrer" className="text-suse-green underline">METHODOLOGY.md</a> for the formulas and references.</p>
+                <div className="inline-flex bg-suse-bg border border-suse-border rounded-lg p-1">
+                  {[['auto', 'Size identical hosts'], ['pool', 'Check mixed inventory']].map(([m, label]) => (
+                    <button key={m} onClick={() => setVirtMode(m)}
+                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${virt.mode === m ? 'bg-suse-green text-white shadow' : 'text-gray-400 hover:text-gray-200'}`}>{label}</button>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-500 mt-2">{virt.mode === 'auto'
+                  ? <>Auto mode computes how many identical hosts (the one marked <strong className="text-gray-400">building block</strong>) are needed.</>
+                  : <>Pool mode checks whether your mixed inventory (each type × quantity) has enough capacity for the workload after reserving the largest hosts for failure.</>}</p>
+              </Panel>
+
+              {/* Host types */}
+              <div>
+                <SectionLabel icon={Server} right={
+                  <button onClick={addHost} className="text-xs flex items-center text-suse-green hover:text-emerald-300"><Plus size={14} className="mr-1" />Add host type</button>
+                }>Physical Host Types</SectionLabel>
+                <div className="space-y-3">
+                  {virt.hosts.map(host => (
+                    <HostCard key={host.id} host={host} mode={virt.mode} cap={capById(host.id)} canRemove={virt.hosts.length > 1}
+                      onUpdate={updateHost} onRemove={removeHost} onPrimary={setPrimaryHost} />
+                  ))}
+                </div>
+              </div>
+
+              {/* Overcommit */}
+              <div>
+                <SectionLabel icon={Sliders}>Overcommit Ratios <span className="text-gray-600 normal-case font-normal ml-1">(non-GPU VMs only)</span></SectionLabel>
+                <Panel className="p-5 space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <VDecimal label="vCPU : pCPU (hardware threads)" value={oc.vcpu} onChange={v => setVirtSection('overcommit','vcpu',v)} />
+                    <VDecimal label="vRAM : pRAM" step={0.1} value={oc.ram} onChange={v => setVirtSection('overcommit','ram',v)} />
+                  </div>
+                  <div className="bg-sky-500/10 border border-sky-500/30 text-sky-200 rounded-lg p-3 flex items-start text-xs">
+                    <Info size={16} className="mr-2 mt-0.5 flex-shrink-0" />
+                    <div>Default <strong>1.0×</strong> on threads counts each hardware thread as one schedulable vCPU — matching the reference design's "2×24 cores + Hyperthreading = 96 vCPU". Raise the vCPU ratio for bursty / non-critical loads (2–4× is common). <strong>GPU VMs are always pinned 1:1</strong> regardless of these ratios, and keeping memory at ~1.0× avoids the host OOM-killing VMs.</div>
+                  </div>
+                </Panel>
+              </div>
+
+              {/* Cluster policy */}
+              <div>
+                <SectionLabel icon={ShieldCheck}>Cluster Resiliency Policy</SectionLabel>
+                <Panel className="p-5 space-y-4">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <NumberField label="Max VMs / host" min={1} value={cl.maxVmsPerNode} onChange={v => setVirtSection('cluster','maxVmsPerNode',v)} />
+                    <NumberField label="Fault tolerance (N+x)" min={0} value={cl.faultTolerance} onChange={v => setVirtSection('cluster','faultTolerance',v)} />
+                    <NumberField label="Storage replication" min={1} value={cl.replication} onChange={v => setVirtSection('cluster','replication',v)} />
+                    {virt.mode === 'auto' && <NumberField label="Decided hosts (0=auto)" min={0} value={cl.decidedNodes} onChange={v => setVirtSection('cluster','decidedNodes',v)} />}
+                  </div>
+                  <p className="text-xs text-gray-500">Fault tolerance reserves spare hosts so the cluster survives node failures and rolling upgrades. Storage replication multiplies raw local storage (ignored when an external array is used).{virt.mode === 'auto' && <> Set <strong>Decided hosts</strong> to override the auto-computed count.</>}</p>
+                </Panel>
+              </div>
+
+              {/* External storage */}
+              <div>
+                <SectionLabel icon={HardDrive}>External Storage</SectionLabel>
+                <Panel className="p-5 space-y-4">
+                  <VToggle label="Use an external storage array instead of host-local storage" checked={st.external} onChange={v => setVirtSection('storage','external',v)} />
+                  {st.external && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">Connection type</label>
+                        <select value={st.connection} onChange={e => setVirtSection('storage','connection',e.target.value)}
+                          className="w-full bg-suse-bg border border-suse-border rounded text-sm text-gray-100 px-2.5 py-2 focus:outline-none focus:border-suse-green">
+                          {Object.entries(STORAGE_CONN).map(([k,label]) => <option key={k} value={k}>{label}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">Capacity / array notes</label>
+                        <VTextField value={st.capacityNote} placeholder="e.g. 2× 100 TB all-flash, dual-controller" onChange={v => setVirtSection('storage','capacityNote',v)} className="w-full" />
+                      </div>
+                    </div>
+                  )}
+                  <div className="bg-sky-500/10 border border-sky-500/30 text-sky-200 rounded-lg p-3 flex items-start text-xs">
+                    <Info size={16} className="mr-2 mt-0.5 flex-shrink-0" />
+                    <div>{st.external
+                      ? <>With an external array, redundancy is handled by the array — host-local replication and the per-host disk constraint are removed from the calculation. Plan <strong>{vs.externalStorageNeeded.toLocaleString('en-US')} GB</strong> usable on the {STORAGE_CONN[st.connection]}{vs.sites > 1 && <> across {vs.sites} sites</>}. Remember to provision the SAN/CSI data path on every host.</>
+                      : <>Host-local storage (SUSE Storage / Longhorn) is replicated <strong>{vs.repl}×</strong>, so raw demand is {vs.agg.storage.toLocaleString('en-US')} GB × {vs.repl} = {(vs.agg.storage * vs.repl).toLocaleString('en-US')} GB spread across hosts.</>}</div>
+                  </div>
+                </Panel>
+              </div>
+
+              {/* DR sites */}
+              <div>
+                <SectionLabel icon={Route}>Disaster Recovery Sites</SectionLabel>
+                <Panel className="p-5 space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+                    <NumberField label="Number of sites (incl. primary)" min={1} value={dr.sites} onChange={v => setVirtSection('dr','sites',v)} />
+                    <div className="md:col-span-2">
+                      <label className="block text-xs text-gray-400 mb-1">DR strategy notes</label>
+                      <VTextField value={dr.note} placeholder="e.g. active/passive, async replication, 15-min RPO" onChange={v => setVirtSection('dr','note',v)} className="w-full" />
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-500">{dr.sites > 1
+                    ? <>Each additional site is sized as a full symmetric copy of the primary cluster — total hardware is multiplied by {dr.sites}.</>
+                    : <>Single site (no DR replica). Increase to model a multi-site / DR footprint.</>}</p>
+                </Panel>
+              </div>
+
+              {/* Custom VMs */}
+              <div>
+                <SectionLabel icon={Edit3} right={
+                  <button onClick={addVirtVm} className="text-xs flex items-center text-suse-green hover:text-emerald-300"><Plus size={14} className="mr-1" />Add VM</button>
+                }>Additional Virtual Machines</SectionLabel>
+                {virt.customVms.length === 0 ? (
+                  <Panel className="p-6 text-center border-dashed">
+                    <p className="text-sm text-gray-500 mb-3">No extra VMs. The {vs.agg.vms} Kubernetes node VM(s) from the Cluster Sizing tab are already included.</p>
+                    <button onClick={addVirtVm} className="mx-auto flex items-center gap-2 px-4 py-2 rounded-lg border border-suse-green/40 text-suse-green text-sm hover:bg-suse-green/10 transition-colors"><Plus size={16}/>Add a VM (Rancher, registry, bastion…)</button>
+                  </Panel>
+                ) : (
+                  <div className="space-y-3">
+                    {virt.customVms.map(vm => (
+                      <Panel key={vm.id} className="p-3">
+                        <div className="flex items-center gap-2 mb-3">
+                          <VTextField value={vm.name} placeholder="VM name" onChange={v => updateVirtVm(vm.id,'name',v)} className="flex-1 font-medium" />
+                          <button onClick={() => removeVirtVm(vm.id)} className="text-gray-500 hover:text-red-400 px-2"><Trash2 size={16} /></button>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                          <NumberField label="Count" min={0} value={vm.count} onChange={v => updateVirtVm(vm.id,'count',v)} />
+                          <NumberField label="vCPU" min={0} value={vm.cpu} onChange={v => updateVirtVm(vm.id,'cpu',v)} />
+                          <NumberField label="RAM GB" min={0} value={vm.ram} onChange={v => updateVirtVm(vm.id,'ram',v)} />
+                          <NumberField label="Disk GB" min={0} value={vm.storage} onChange={v => updateVirtVm(vm.id,'storage',v)} />
+                          <NumberField label="GPU" min={0} value={vm.gpu} onChange={v => updateVirtVm(vm.id,'gpu',v)} />
+                        </div>
+                      </Panel>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* ---------------- Results sidebar ---------------- */}
+            <div className="lg:col-span-1">
+              <div className="lg:sticky lg:top-32 space-y-4">
+                {/* Headline */}
+                {vs.mode === 'auto' ? (
+                  <Panel className="p-5 text-center">
+                    <div className="text-xs uppercase text-gray-500 font-bold tracking-wider mb-1">Recommended Hosts {vs.sites > 1 && `/ site`}</div>
+                    <div className="text-5xl font-bold text-suse-green font-mono">{vs.decided}</div>
+                    <div className="text-xs text-gray-500 mt-1">
+                      {vs.autoNodes ? <>auto: {vs.minNodes} for load + {vs.ft} for fault tolerance</> : <>manually set (auto would be {vs.requiredNodes})</>}
+                    </div>
+                    <div className="text-[11px] text-gray-600 mt-1">building block: {vs.primary.name}</div>
+                    {vs.sites > 1 && <div className="mt-2 text-sm text-white font-mono">{vs.totals.totalHosts} hosts total across {vs.sites} sites</div>}
+                  </Panel>
+                ) : (
+                  <Panel className="p-5 text-center">
+                    <div className="text-xs uppercase text-gray-500 font-bold tracking-wider mb-1">Inventory Feasibility</div>
+                    <div className={`text-3xl font-bold font-mono ${vs.feasible ? 'text-suse-green' : 'text-red-300'}`}>{vs.feasible ? 'Sufficient' : 'Insufficient'}</div>
+                    <div className="text-xs text-gray-500 mt-1">{vs.totalHosts} host(s) defined · tolerating {vs.ft} failure(s)</div>
+                    {vs.sites > 1 && <div className="mt-2 text-sm text-white font-mono">{vs.totals.totalHosts} hosts total across {vs.sites} sites</div>}
+                  </Panel>
+                )}
+
+                {/* Aggregated workload */}
+                <Panel className="p-5">
+                  <SectionLabel icon={Boxes}>Aggregated VM Fleet</SectionLabel>
+                  <VResultRow label="Total VMs" value={vs.agg.vms} />
+                  <VResultRow label="Total vCPU" value={vs.agg.cpu} sub={`≈ ${Math.ceil(vs.demand.cpu).toLocaleString('en-US')} physical threads · largest VM ${vs.agg.maxCpu}`} />
+                  <VResultRow label="Total RAM" value={`${vs.agg.ram.toLocaleString('en-US')} GB`} sub={`≈ ${Math.ceil(vs.demand.ram).toLocaleString('en-US')} GB physical · largest VM ${vs.agg.maxRam} GB`} />
+                  <VResultRow label="Total storage" value={`${vs.agg.storage.toLocaleString('en-US')} GB`} sub={vs.ext ? 'external array' : `×${vs.repl} replicated = ${(vs.agg.storage*vs.repl).toLocaleString('en-US')} GB`} />
+                  {vs.agg.gpu > 0 && <VResultRow label="Total GPUs" value={vs.agg.gpu} />}
+                  {vs.agg.gpuVms > 0 && <div className="mt-2 text-[11px] text-gray-500">{vs.agg.gpuVms} GPU VM(s) pinned at 1:1 (no overcommit); overcommit applies to the other {vs.agg.vms - vs.agg.gpuVms} VM(s).</div>}
+                </Panel>
+
+                {vs.mode === 'auto' ? (
+                  <>
+                    {/* Binding resource */}
+                    <Panel className="p-5">
+                      <SectionLabel icon={Sliders}>Minimum Hosts by Resource</SectionLabel>
+                      <VResultRow label="By VM density" value={vs.min.vms} />
+                      <VResultRow label="By vCPU" value={vs.min.cpu} />
+                      <VResultRow label="By RAM" value={vs.min.ram} />
+                      <VResultRow label="By storage" value={vs.ext ? '— (external)' : vs.min.storage} />
+                      {vs.agg.gpu > 0 && <VResultRow label="By GPU" value={vs.gpuInfeasible ? 'block has 0 GPUs' : vs.min.gpu} tone={vs.gpuInfeasible ? 'bad' : undefined} />}
+                      <div className="mt-2 pt-2 border-t border-suse-border flex items-center justify-between">
+                        <span className="text-sm text-gray-300 font-medium">Binding minimum</span>
+                        <span className="font-mono font-bold text-white">{vs.minNodes} + {vs.ft} FT = {vs.requiredNodes}</span>
+                      </div>
+                    </Panel>
+
+                    {/* Per-host utilisation */}
+                    <Panel className="p-5">
+                      <SectionLabel icon={Server}>Per-Host Utilisation</SectionLabel>
+                      {vs.normal && (
+                        <div className="mb-3">
+                          <div className="text-xs text-gray-400 mb-1">Normal ({vs.decided} hosts)</div>
+                          <VResultRow label="vCPU / host" value={`${vs.normal.cpu} / ${vs.H.cpu}`} sub={vs.util && `${vs.util.cpu}% (physical threads)`} />
+                          <VResultRow label="RAM / host" value={`${vs.normal.ram} / ${vs.H.ram} GB`} sub={vs.util && `${vs.util.ram}%`} />
+                          {!vs.ext && <VResultRow label="Storage / host" value={`${vs.normal.storage.toLocaleString('en-US')} / ${vs.H.storage.toLocaleString('en-US')} GB`} sub={vs.util && `${vs.util.storage}%`} />}
+                        </div>
+                      )}
+                      <div>
+                        <div className="text-xs text-gray-400 mb-1">Degraded ({vs.failDenom} hosts after {vs.ft} failure{vs.ft !== 1 ? 's' : ''})</div>
+                        {vs.failure ? (
+                          <>
+                            <VResultRow label="vCPU / host" value={`${vs.failure.cpu} / ${vs.H.cpu}`} tone={vs.failure.cpu > vs.H.cpu ? 'bad' : 'good'} />
+                            <VResultRow label="RAM / host" value={`${vs.failure.ram} / ${vs.H.ram} GB`} tone={vs.failure.ram > vs.H.ram ? 'bad' : 'good'} />
+                            {!vs.ext && <VResultRow label="Storage / host" value={`${vs.failure.storage.toLocaleString('en-US')} / ${vs.H.storage.toLocaleString('en-US')} GB`} tone={vs.failure.storage > vs.H.storage ? 'bad' : 'good'} />}
+                          </>
+                        ) : <p className="text-xs text-red-300">Not enough hosts to absorb {vs.ft} failure(s).</p>}
+                      </div>
+                    </Panel>
+                  </>
+                ) : (
+                  /* Pool capacity vs demand (surviving = after the FT largest hosts fail) */
+                  <Panel className="p-5">
+                    <SectionLabel icon={Sliders}>Demand vs Surviving Capacity</SectionLabel>
+                    {capRow('vCPU (threads)', vs.demand.cpu, vs.cap.cpu)}
+                    {capRow('RAM (GB)', vs.demand.ram, vs.cap.ram, '')}
+                    {!vs.ext && capRow('Storage (GB)', vs.demand.storage, vs.cap.storage, '')}
+                    {capRow('GPUs', vs.demand.gpu, vs.cap.gpu, '')}
+                    {capRow('VM slots', vs.agg.vms, vs.cap.vms, '')}
+                    <p className="text-[11px] text-gray-500 mt-2">"Surviving" reserves the {vs.ft} largest host(s) for failure/maintenance.</p>
+                  </Panel>
+                )}
+
+                {/* Rule checks */}
+                <Panel className="p-5">
+                  <SectionLabel icon={CheckCircle}>Design Rule Checks</SectionLabel>
+                  <div className="space-y-2">
+                    {vs.checks.map((c, i) => (
+                      <div key={i} className={`flex items-start text-xs rounded-md p-2 border ${c.ok ? 'bg-suse-green/10 border-suse-green/30 text-suse-green' : 'bg-red-500/10 border-red-500/30 text-red-200'}`}>
+                        {c.ok ? <CheckCircle size={14} className="mr-2 mt-0.5 flex-shrink-0" /> : <AlertTriangle size={14} className="mr-2 mt-0.5 flex-shrink-0" />}
+                        <span>{c.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                </Panel>
+
+                {/* Provisioned totals */}
+                <Panel className="p-5">
+                  <SectionLabel icon={Boxes}>Provisioned Hardware{vs.sites > 1 ? ` (${vs.sites} sites)` : ''}</SectionLabel>
+                  <VResultRow label="Physical hosts" value={vs.totals.totalHosts} />
+                  <VResultRow label="Physical cores" value={vs.totals.cores.toLocaleString('en-US')} sub={`${vs.totals.threads.toLocaleString('en-US')} threads`} />
+                  <VResultRow label="RAM" value={`${vs.totals.ram.toLocaleString('en-US')} GB`} />
+                  {vs.ext
+                    ? <VResultRow label="External usable storage" value={`${vs.externalStorageNeeded.toLocaleString('en-US')} GB`} sub={STORAGE_CONN[virt.storage.connection]} />
+                    : <VResultRow label="Raw local storage" value={`${vs.totals.storage.toLocaleString('en-US')} GB`} />}
+                  {vs.totals.gpus > 0 && <VResultRow label="GPUs" value={vs.totals.gpus} />}
+                </Panel>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
       function HowToTab() {
         return (
           <div className="max-w-3xl mx-auto space-y-6">
@@ -1156,8 +1718,9 @@
               <Step n="1" title="Size your base nodes">Set node counts for the control plane and worker groups. Toggle <strong className="text-gray-200">Per-node</strong> to give individual nodes different CPU, RAM, storage or GPU values.</Step>
               <Step n="2" title="Select services">Tick the SUSE AI services you plan to run. Some offer sizing profiles (e.g. Observability scales by cluster size). Add your own workloads under <strong className="text-gray-200">Custom Applications</strong>.</Step>
               <Step n="3" title="Watch the live totals">The sidebar shows total capacity vs. demand and the remaining headroom in real time, flagging GPU deficits automatically.</Step>
-              <Step n="4" title="Review architecture & network">The <strong className="text-gray-200">Architecture</strong> tab renders your cluster visually; <strong className="text-gray-200">Network</strong> lists the firewall rules implied by your selections.</Step>
-              <Step n="5" title="Export & share">Use the action bar to export a <strong className="text-gray-200">PDF report</strong>, save/load a JSON config, or copy a <strong className="text-gray-200">share link</strong> that encodes the whole configuration in the URL.</Step>
+              <Step n="4" title="Plan the bare-metal virtualization layer">On the <strong className="text-gray-200">Virtualization</strong> tab, describe one physical SUSE Virtualization (Harvester) host, set overcommit and resiliency policy, and the tool sizes how many hosts are needed to run every cluster node as a VM. Add extra VMs, model an external storage array, or replicate across DR sites.</Step>
+              <Step n="5" title="Review architecture & network">The <strong className="text-gray-200">Architecture</strong> tab renders your cluster visually; <strong className="text-gray-200">Network</strong> lists the firewall rules implied by your selections.</Step>
+              <Step n="6" title="Export & share">Use the action bar to export a <strong className="text-gray-200">PDF report</strong>, save/load a JSON config, or copy a <strong className="text-gray-200">share link</strong> that encodes the whole configuration in the URL.</Step>
             </Panel>
             <Panel className="p-6">
               <h3 className="font-bold text-white mb-2 flex items-center"><Info size={16} className="mr-2 text-suse-green" />Good to know</h3>
@@ -1185,6 +1748,7 @@
               <h3 className="font-bold text-white mb-3">What's included</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-gray-400">
                 <Feature icon={Sliders}>Per-node & profile-based sizing</Feature>
+                <Feature icon={Boxes}>Bare-metal virtualization host sizing</Feature>
                 <Feature icon={Edit3}>Custom application workloads</Feature>
                 <Feature icon={MapIcon}>Live architecture diagram</Feature>
                 <Feature icon={Network}>Derived firewall rules</Feature>
@@ -1220,13 +1784,13 @@
             const parsed = JSON.parse(decodeURIComponent(atob(m[1])));
             if (parsed && parsed.base && parsed.services) {
               history.replaceState(null, '', location.pathname + location.search);
-              return parsed;
+              return migrateState(parsed);
             }
           }
         } catch (e) {}
         try {
           const saved = localStorage.getItem('suse-ai-sizing');
-          if (saved) { const parsed = JSON.parse(saved); if (parsed && parsed.base && parsed.services) return parsed; }
+          if (saved) { const parsed = JSON.parse(saved); if (parsed && parsed.base && parsed.services) return migrateState(parsed); }
         } catch (e) {}
         return defaultFn();
       }
@@ -1298,7 +1862,7 @@
         return _pdfLibsPromise;
       }
 
-      async function generatePdfReport(summary, networkRules) {
+      async function generatePdfReport(summary, networkRules, virt, virtCfg) {
         const { jsPDF } = window.jspdf;
         const doc = new jsPDF('p', 'mm', 'a4');
         const pageW = doc.internal.pageSize.getWidth();
@@ -1315,7 +1879,7 @@
         doc.setFontSize(20); doc.setTextColor('#0C322C');
         doc.text("SUSE AI Sizing Report", pageW / 2, 42, { align: 'center' });
         doc.setFontSize(9); doc.setTextColor('#6b7280');
-        doc.text(new Date().toLocaleString(), pageW / 2, 48, { align: 'center' });
+        doc.text(new Date().toLocaleString('en-US'), pageW / 2, 48, { align: 'center' });
 
         // Summary image
         const summaryEl = document.getElementById('pdf-summary');
@@ -1362,6 +1926,80 @@
           });
           y = doc.lastAutoTable.finalY + 10;
         });
+
+        // Virtualization (bare-metal host) sizing
+        if (virt && virt.agg && virt.agg.vms > 0) {
+          doc.addPage('a4', 'p');
+          let vy = 20;
+          doc.setFontSize(15); doc.setTextColor('#0C322C');
+          doc.text("SUSE Virtualization (Bare-Metal) Sizing", margin, vy); vy += 6;
+          const ext = virt.ext;
+
+          doc.setFontSize(9); doc.setTextColor('#6b7280');
+          doc.text(`Mode: ${virt.mode === 'pool' ? 'Mixed inventory check' : 'Auto-size identical hosts'}  ·  Overcommit (non-GPU): ${virtCfg.overcommit.vcpu}× vCPU / ${virtCfg.overcommit.ram}× RAM  ·  GPU VMs pinned 1:1`, margin, vy); vy += 6;
+
+          doc.autoTable({ startY: vy, theme: 'grid', headStyles: { fillColor: [48, 186, 120] }, styles: { fontSize: 8 }, margin: { left: margin, right: margin },
+            head: [['Host type', 'Qty', 'Sockets×cores×thr', 'Sched. threads', 'Usable RAM', 'Storage', 'GPU']],
+            body: virtCfg.hosts.map(h => { const c = virt.hostCaps.find(x => x.id === h.id) || {}; return [
+              h.name + (h.primary && virt.mode === 'auto' ? ' (block)' : ''),
+              virt.mode === 'pool' ? String(h.count) : '—',
+              `${h.sockets}×${h.coresPerSocket}×${h.threadsPerCore} = ${c.threads}`,
+              String(c.cpu), `${(c.ram || 0).toLocaleString('en-US')} GB`,
+              ext ? '—' : `${(h.storage || 0).toLocaleString('en-US')} GB`, String(h.gpus),
+            ]; }) });
+          vy = doc.lastAutoTable.finalY + 6;
+
+          doc.autoTable({ startY: vy, theme: 'grid', headStyles: { fillColor: [48, 186, 120] }, styles: { fontSize: 9 }, margin: { left: margin, right: margin },
+            head: [['Aggregated VM fleet', 'Value']],
+            body: [
+              ['Total VMs', `${virt.agg.vms} (${virt.agg.gpuVms} GPU-pinned)`],
+              ['Total vCPU', `${virt.agg.cpu} (~${Math.ceil(virt.demand.cpu)} physical threads, largest VM ${virt.agg.maxCpu})`],
+              ['Total RAM', `${virt.agg.ram.toLocaleString('en-US')} GB (~${Math.ceil(virt.demand.ram).toLocaleString('en-US')} GB physical, largest VM ${virt.agg.maxRam} GB)`],
+              ['Total storage', ext ? `${virt.externalStorageNeeded.toLocaleString('en-US')} GB usable (external)` : `${virt.agg.storage.toLocaleString('en-US')} GB × ${virt.repl} = ${(virt.agg.storage*virt.repl).toLocaleString('en-US')} GB`],
+              ['Total GPUs', String(virt.agg.gpu)],
+            ] });
+          vy = doc.lastAutoTable.finalY + 6;
+
+          const resultBody = virt.mode === 'pool'
+            ? [
+                ['Inventory feasibility', virt.feasible ? 'SUFFICIENT' : 'INSUFFICIENT'],
+                ['Hosts defined / site', String(virt.totalHosts)],
+                ['Fault tolerance', `reserve ${virt.ft} largest host(s)`],
+                ['Surviving vCPU (threads)', `demand ${Math.ceil(virt.demand.cpu)} / ${Math.round(virt.cap.cpu.surviving)} avail`],
+                ['Surviving RAM (GB)', `demand ${Math.ceil(virt.demand.ram)} / ${Math.round(virt.cap.ram.surviving)} avail`],
+                ['DR sites', String(virt.sites)],
+                ['Total physical hosts', String(virt.totals.totalHosts)],
+                ['Total cores / threads', `${virt.totals.cores.toLocaleString('en-US')} / ${virt.totals.threads.toLocaleString('en-US')}`],
+                ['Total RAM', `${virt.totals.ram.toLocaleString('en-US')} GB`],
+                ['Total GPUs', String(virt.totals.gpus)],
+              ]
+            : [
+                ['Minimum hosts (load)', String(virt.minNodes)],
+                ['Fault tolerance', `+ ${virt.ft}`],
+                ['Recommended hosts / site', `${virt.decided}${virt.autoNodes ? ' (auto)' : ' (manual)'}`],
+                ['DR sites', String(virt.sites)],
+                ['Total physical hosts', String(virt.totals.totalHosts)],
+                ['Total cores / threads', `${virt.totals.cores.toLocaleString('en-US')} / ${virt.totals.threads.toLocaleString('en-US')}`],
+                ['Total RAM', `${virt.totals.ram.toLocaleString('en-US')} GB`],
+                [ext ? 'External usable storage' : 'Total raw local storage', `${(ext ? virt.externalStorageNeeded : virt.totals.storage).toLocaleString('en-US')} GB`],
+                ['Total GPUs', String(virt.totals.gpus)],
+              ];
+          doc.autoTable({ startY: vy, theme: 'grid', headStyles: { fillColor: [12, 50, 44] }, styles: { fontSize: 9 }, margin: { left: margin, right: margin },
+            head: [['Host sizing result', 'Value']], body: resultBody });
+          vy = doc.lastAutoTable.finalY + 6;
+
+          doc.autoTable({ startY: vy, theme: 'plain', styles: { fontSize: 9 }, margin: { left: margin, right: margin },
+            head: [['Design rule checks', '']], headStyles: { fillColor: [48, 186, 120], textColor: 255 },
+            body: virt.checks.map(c => [c.ok ? 'PASS' : 'FAIL', c.label]),
+            didParseCell: (d) => { if (d.section === 'body' && d.column.index === 0) { d.cell.styles.textColor = d.cell.raw === 'PASS' ? [22,140,90] : [200,40,40]; d.cell.styles.fontStyle = 'bold'; } } });
+          vy = doc.lastAutoTable.finalY + 6;
+          if (virtCfg.dr.note) {
+            doc.setFontSize(9); doc.setTextColor('#6b7280');
+            const dl = doc.splitTextToSize(`DR strategy: ${virtCfg.dr.note}`, pageW - margin * 2);
+            doc.text(dl, margin, vy); vy += dl.length * 4 + 2;
+          }
+          y = vy; // continue the disclaimer flow after this page
+        }
 
         // Disclaimer
         const disclaimer = "Disclaimer: This report was generated by an unofficial, community-built planning " +

@@ -21,10 +21,11 @@ The SUSE AI Sizing Architect lets you model a cluster, attach SUSE AI services a
 - **Per-node configuration** — flip any group into per-node mode to give individual nodes distinct CPU / RAM / storage / GPU values, and add or remove nodes freely.
 - **SUSE AI services** — NeuVector (Security), Longhorn (Storage), Private Registry, Milvus, Ollama, Open WebUI and Observability, several with selectable sizing profiles.
 - **Custom applications** — add arbitrary workloads so their resource demand is folded into every total.
+- **Bare-metal virtualization sizing** — plan the SUSE Virtualization (Harvester) hosts that run SUSE AI. Define one or more **physical host types** (sockets/cores/threads, RAM, storage, GPUs, optional hypervisor reservation), set CPU/RAM overcommit and an N+x resiliency policy, and the tool treats every cluster node as a VM to derive sizing. **GPU VMs are pinned 1:1** (never overcommitted) automatically. Two modes: **Auto** (how many identical hosts are needed, with per-host utilization in normal and degraded states) and **Pool** (capacity-check a mixed/heterogeneous inventory, reserving the largest hosts for failure). Supports extra VMs, external storage arrays (FC / iSCSI / DAS / CSI / NFS), and multi-site DR. Full formulas, assumptions and references are documented in [METHODOLOGY.md](METHODOLOGY.md).
 - **Live totals** — a sticky sidebar shows total capacity vs. demand and remaining headroom in real time, flagging GPU deficits automatically.
 - **Architecture diagram** — an auto-generated visual of your cluster and the services running on it.
 - **Network & firewall rules** — the required ports are derived from your selected components.
-- **PDF report export** — a multi-page report (summary, architecture, network tables) generated in-browser.
+- **PDF report export** — a multi-page report (summary, architecture, virtualization host sizing, network tables) generated in-browser.
 - **Save, load & share** — auto-saves to your browser, exports/imports JSON, and produces a share link that encodes the entire configuration in the URL.
 
 ## Tech stack
@@ -84,6 +85,7 @@ const APP_VERSION = "2.0.0";                                          // shown i
 ```
 .
 ├── index.html                 # the entire application
+├── METHODOLOGY.md             # sizing formulas, assumptions & references
 ├── assets/
 │   ├── suse-ai-neg-green-stacked.svg   # header/About logo (dark theme)
 │   └── suse-ai-pos-green-stacked.svg   # PDF/light-background logo
@@ -105,6 +107,7 @@ The commit history tracks the evolution of the tool from its first app.new scaff
 | 2025-07-23 | Custom apps | User-defined workloads folded into the totals |
 | 2025-08-08 | Individual nodes | Full per-node configuration across all groups |
 | 2026-06-14 | **v2.0.0** | Dark SUSE-themed UI, unified features, save/share, GitHub Pages CI |
+| 2026-06-23 | **v2.1.0** | Virtualization tab: bare-metal SUSE Virtualization (Harvester) host sizing — multiple host types (auto & mixed-inventory modes), automatic GPU VM pinning, overcommit, fault tolerance, optional hypervisor reservation, external storage and DR; documented in METHODOLOGY.md |
 
 ## Disclaimer
 
