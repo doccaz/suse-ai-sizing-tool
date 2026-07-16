@@ -98,6 +98,13 @@
       const ShieldCheck = I(<><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></>);
       const Database = I(<><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></>);
       const Container = I(<><path d="M22 7.7c0-1.2-1.4-1.7-2.2-.9l-6.5 6.5c-.3.3-.7.5-1.1.5H3.8c-1 0-1.8.8-1.8 1.8s.8 1.8 1.8 1.8h8.5c.4 0 .8.2 1.1.5l6.5 6.5c.8.8 2.2.3 2.2-1.2V7.7z"/><path d="M3.8 17H2"/><path d="M3.8 12H2"/><path d="M3.8 7H2"/></>);
+      // Official Rancher bull mark (from apps.rancher.io logo), tinted via currentColor.
+      // Wider than tall (~1.9:1), so it can't use the square I() helper.
+      const RancherBull = (props) => (
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="22.5 22.4 59.2 31.7" fill="currentColor" {...props}>
+          <path d="M78.67,25.96h-6.84c-0.06,0-0.11,0-0.17,0.01h-7.02c-0.08,0-0.16,0.01-0.24,0.02v-0.65c0-1.39-0.35-2.54-0.77-2.54c-0.43,0-0.96,1.13-1.19,2.5l-0.71,4.29c-0.23,1.38,0.72,2.5,2.12,2.5h4.22c0.43,0,0.84-0.07,1.2-0.19c-0.13,0.72-0.76,1.26-1.52,1.26h-5.91c-0.96,0-1.68-0.86-1.53-1.8l0.6-3.59c0.16-0.94-0.57-1.8-1.53-1.8H29.95c-0.63,0-1.17,0.37-1.41,0.91L23,35.31c-0.09,0.14-0.08,0.33,0.03,0.46l1.08,1.27c0.13,0.16,0.37,0.18,0.53,0.05l3.77-2.97v18.04c0,0.86,0.69,1.55,1.55,1.55h8.35c0.86,0,1.55-0.69,1.55-1.55v-6.27c0-0.85,0.69-1.55,1.55-1.55h20.85c0.86,0,1.55,0.69,1.55,1.55v6.27c0,0.86,0.69,1.55,1.55,1.55h8.35c0.85,0,1.55-0.69,1.55-1.55v-6.75h-4.44c-1.39,0-2.54-1.14-2.54-2.54v-4.34c0-0.83,0.4-1.56,1.02-2.02v5.18c0,1.39,1.14,2.54,2.54,2.54h6.84c1.39,0,2.54-1.14,2.54-2.54V28.5C81.21,27.11,80.07,25.96,78.67,25.96"/>
+        </svg>
+      );
       const Archive = I(<><rect x="2" y="5" width="20" height="5" rx="2"/><path d="M2 10v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V10"/><line x1="10" y1="15" x2="14" y2="15"/></>);
       const Globe = I(<><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></>);
       const BarChart3 = I(<><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></>);
@@ -1605,7 +1612,7 @@
           <span className="flex items-center text-sm text-gray-400"><Icon size={16} className="mr-2 text-suse-green" />{label}</span>
           <span className="text-right">
             <span className="text-lg font-bold text-white font-mono">{value}</span>
-            <span className="block text-[10px] text-gray-500 font-mono">demand {demand}</span>
+            <span className="block text-[11px] font-mono text-gray-400"><span className="uppercase tracking-wide text-gray-200">demand</span> <span className="font-bold text-gray-200">{demand}</span></span>
           </span>
         </div>
       );
@@ -2288,7 +2295,7 @@
               <h3 className="font-bold text-white mb-3">Resources</h3>
               <div className="space-y-2 text-sm">
                 <a href="https://www.suse.com/solutions/ai/" target="_blank" rel="noopener noreferrer" className="flex items-center text-suse-green hover:text-emerald-300"><Globe size={15} className="mr-2" />SUSE AI overview</a>
-                <a href="https://apps.rancher.com" target="_blank" rel="noopener noreferrer" className="flex items-center text-suse-green hover:text-emerald-300"><Container size={15} className="mr-2" />SUSE Application Collection</a>
+                <a href="https://apps.rancher.com" target="_blank" rel="noopener noreferrer" className="flex items-center text-suse-green hover:text-emerald-300"><RancherBull className="mr-2 h-4 w-auto flex-shrink-0" />SUSE Application Collection</a>
                 <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" className="flex items-center text-suse-green hover:text-emerald-300"><FileText size={15} className="mr-2" />Source on GitHub</a>
               </div>
             </Panel>
