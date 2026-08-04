@@ -1,0 +1,317 @@
+{
+  "auto": {
+    "mode": "auto",
+    "agg": {
+      "vms": 17,
+      "cpu": 114,
+      "ram": 324,
+      "storage": 2400,
+      "gpu": 3,
+      "gpuVms": 3,
+      "maxCpu": 16,
+      "maxRam": 32,
+      "maxStorage": 250,
+      "maxGpu": 1,
+      "gpuVcpu": 48,
+      "nonGpuVcpu": 66,
+      "gpuRam": 96,
+      "nonGpuRam": 228
+    },
+    "demand": {
+      "cpu": 64.5,
+      "ram": 286,
+      "storage": 7200,
+      "gpu": 3
+    },
+    "maxVmThreads": 16,
+    "maxVmRam": 32,
+    "totals": {
+      "perSiteHosts": 5,
+      "totalHosts": 10,
+      "cores": 480,
+      "threads": 960,
+      "ram": 5120,
+      "storage": 76800,
+      "gpus": 10
+    },
+    "externalStorageNeeded": 0,
+    "checks": [
+      "PASS A single host can schedule the largest VM (needs 16 threads)",
+      "PASS A single host can hold the largest VM's RAM (needs 32 GB)",
+      "PASS A single host can hold the largest volume (250 GB, no volume striping)",
+      "PASS A GPU host can place the largest GPU VM (1 GPU)",
+      "PASS Cluster survives 2 simultaneous host failure(s) with a spare for upgrades"
+    ],
+    "hostCaps": [
+      {
+        "id": "h1",
+        "name": "Host Type 1",
+        "count": 1,
+        "cores": 48,
+        "threads": 96,
+        "cpu": 96,
+        "ram": 512,
+        "rawRam": 512,
+        "storage": 7680,
+        "rawStorage": 7680,
+        "gpu": 1,
+        "ohCpu": 0,
+        "ohRam": 0
+      },
+      {
+        "id": "h2",
+        "name": "Host Type 2",
+        "count": 4,
+        "cores": 32,
+        "threads": 64,
+        "cpu": 62,
+        "ram": 248,
+        "rawRam": 256,
+        "storage": 3840,
+        "rawStorage": 3840,
+        "gpu": 0,
+        "ohCpu": 0,
+        "ohRam": 0
+      }
+    ],
+    "min": {
+      "vms": 1,
+      "cpu": 1,
+      "ram": 1,
+      "storage": 1,
+      "gpu": 3
+    },
+    "minNodes": 3,
+    "requiredNodes": 5,
+    "decided": 5,
+    "failDenom": 3,
+    "normal": {
+      "vms": 4,
+      "cpu": 13,
+      "ram": 58,
+      "storage": 1440
+    },
+    "failure": {
+      "vms": 6,
+      "cpu": 22,
+      "ram": 96,
+      "storage": 2400
+    },
+    "util": {
+      "cpu": 14,
+      "ram": 11,
+      "storage": 19
+    }
+  },
+  "pool": {
+    "mode": "pool",
+    "agg": {
+      "vms": 17,
+      "cpu": 114,
+      "ram": 324,
+      "storage": 2400,
+      "gpu": 3,
+      "gpuVms": 3,
+      "maxCpu": 16,
+      "maxRam": 32,
+      "maxStorage": 250,
+      "maxGpu": 1,
+      "gpuVcpu": 48,
+      "nonGpuVcpu": 66,
+      "gpuRam": 96,
+      "nonGpuRam": 228
+    },
+    "demand": {
+      "cpu": 64.5,
+      "ram": 286,
+      "storage": 7200,
+      "gpu": 3
+    },
+    "maxVmThreads": 16,
+    "maxVmRam": 32,
+    "totals": {
+      "perSiteHosts": 5,
+      "totalHosts": 10,
+      "cores": 352,
+      "threads": 704,
+      "ram": 3072,
+      "storage": 46080,
+      "gpus": 2
+    },
+    "externalStorageNeeded": 0,
+    "checks": [
+      "PASS A single host can schedule the largest VM (needs 16 threads)",
+      "PASS A single host can hold the largest VM's RAM (needs 32 GB)",
+      "PASS A single host can hold the largest volume (250 GB, no volume striping)",
+      "PASS A GPU host can place the largest GPU VM (1 GPU)",
+      "FAIL Inventory still runs the full load after 2 host failure(s)"
+    ],
+    "hostCaps": [
+      {
+        "id": "h1",
+        "name": "Host Type 1",
+        "count": 1,
+        "cores": 48,
+        "threads": 96,
+        "cpu": 96,
+        "ram": 512,
+        "rawRam": 512,
+        "storage": 7680,
+        "rawStorage": 7680,
+        "gpu": 1,
+        "ohCpu": 0,
+        "ohRam": 0
+      },
+      {
+        "id": "h2",
+        "name": "Host Type 2",
+        "count": 4,
+        "cores": 32,
+        "threads": 64,
+        "cpu": 62,
+        "ram": 248,
+        "rawRam": 256,
+        "storage": 3840,
+        "rawStorage": 3840,
+        "gpu": 0,
+        "ohCpu": 0,
+        "ohRam": 0
+      }
+    ],
+    "totalHosts": 5,
+    "cap": {
+      "cpu": {
+        "total": 344,
+        "surviving": 186
+      },
+      "ram": {
+        "total": 1504,
+        "surviving": 744
+      },
+      "storage": {
+        "total": 23040,
+        "surviving": 11520
+      },
+      "gpu": {
+        "total": 1,
+        "surviving": 0
+      },
+      "vms": {
+        "total": 200,
+        "surviving": 120
+      }
+    },
+    "checksPool": {
+      "cpu": true,
+      "ram": true,
+      "storage": true,
+      "gpu": false,
+      "vms": true
+    },
+    "feasible": false
+  },
+  "autoExtStor": {
+    "mode": "auto",
+    "agg": {
+      "vms": 17,
+      "cpu": 114,
+      "ram": 324,
+      "storage": 2400,
+      "gpu": 3,
+      "gpuVms": 3,
+      "maxCpu": 16,
+      "maxRam": 32,
+      "maxStorage": 250,
+      "maxGpu": 1,
+      "gpuVcpu": 48,
+      "nonGpuVcpu": 66,
+      "gpuRam": 96,
+      "nonGpuRam": 228
+    },
+    "demand": {
+      "cpu": 64.5,
+      "ram": 286,
+      "storage": 0,
+      "gpu": 3
+    },
+    "maxVmThreads": 16,
+    "maxVmRam": 32,
+    "totals": {
+      "perSiteHosts": 5,
+      "totalHosts": 10,
+      "cores": 480,
+      "threads": 960,
+      "ram": 5120,
+      "storage": 0,
+      "gpus": 10
+    },
+    "externalStorageNeeded": 4800,
+    "checks": [
+      "PASS A single host can schedule the largest VM (needs 16 threads)",
+      "PASS A single host can hold the largest VM's RAM (needs 32 GB)",
+      "PASS Largest volume served by external storage",
+      "PASS A GPU host can place the largest GPU VM (1 GPU)",
+      "PASS Cluster survives 2 simultaneous host failure(s) with a spare for upgrades"
+    ],
+    "hostCaps": [
+      {
+        "id": "h1",
+        "name": "Host Type 1",
+        "count": 1,
+        "cores": 48,
+        "threads": 96,
+        "cpu": 96,
+        "ram": 512,
+        "rawRam": 512,
+        "storage": 7680,
+        "rawStorage": 7680,
+        "gpu": 1,
+        "ohCpu": 0,
+        "ohRam": 0
+      },
+      {
+        "id": "h2",
+        "name": "Host Type 2",
+        "count": 4,
+        "cores": 32,
+        "threads": 64,
+        "cpu": 62,
+        "ram": 248,
+        "rawRam": 256,
+        "storage": 3840,
+        "rawStorage": 3840,
+        "gpu": 0,
+        "ohCpu": 0,
+        "ohRam": 0
+      }
+    ],
+    "min": {
+      "vms": 1,
+      "cpu": 1,
+      "ram": 1,
+      "storage": 0,
+      "gpu": 3
+    },
+    "minNodes": 3,
+    "requiredNodes": 5,
+    "decided": 5,
+    "failDenom": 3,
+    "normal": {
+      "vms": 4,
+      "cpu": 13,
+      "ram": 58,
+      "storage": 0
+    },
+    "failure": {
+      "vms": 6,
+      "cpu": 22,
+      "ram": 96,
+      "storage": 0
+    },
+    "util": {
+      "cpu": 14,
+      "ram": 11,
+      "storage": 0
+    }
+  }
+}

@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.4.0";
+      const APP_VERSION = "2.7.0";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -409,6 +409,8 @@
       });
       const defaultVirt = () => ({
         mode: 'auto',                               // 'auto' = size N identical hosts; 'pool' = check a mixed inventory
+        platform: 'harvester',                      // hypervisor overhead model; see HYPERVISORS
+        overhead: { auto: true, addons: {}, overrides: {}, dismissed: false },
         hosts: [ defaultHostType(1) ],
         overcommit: { vcpu: 1, ram: 1 },            // vCPU/RAM overcommit applied to NON-GPU VMs only; GPU VMs stay 1:1
         cluster: { maxVmsPerNode: 40, faultTolerance: 2, replication: 3, decidedNodes: 0 }, // decidedNodes 0 = auto
@@ -425,6 +427,544 @@
         nfs:   'NFS / file share',
       };
 
+      /* ================= Hypervisor platform overhead =================
+         Real management-plane cost, which the raw spreadsheet model ignores.
+         Five additive terms (see METHODOLOGY.md § Hypervisor platform overhead):
+
+           A  per-node kubelet reserve   CPU only, Harvester-specific formula
+           B  per-node platform pods     split every-node vs. first-3-nodes-only
+           C  per-VM hypervisor overhead scales with guest RAM + vCPU
+           D  per-device overhead        GPU / SR-IOV passthrough
+           E  per-node storage reserve   percentage of raw disk
+
+         Every coefficient carries `src` (where it comes from) and `tier`:
+           'verified' = traced to vendor source code, or a published worked
+                        example this model reproduces numerically;
+           'estimate' = vendor blog / community measurement / inference.
+         The UI and the PDF render the tier, so a customer can tell a derived
+         number from an observed one. Nothing here is a bare assertion. */
+      /* Doc links are pinned to a released version, not /latest/ or a Dev branch:
+         these citations back specific quoted figures, and an unpinned link
+         silently stops matching when the docs move. v1.8 is the current Latest
+         release (v1.9 is Dev). Re-verify the quoted numbers before bumping. */
+      const HARVESTER_DOCS = 'https://docs.harvesterhci.io/v1.8';
+      const OVERHEAD_SRC = {
+        hvCpuPin:   `${HARVESTER_DOCS}/vm/cpu-pinning`,
+        hvReqs:     `${HARVESTER_DOCS}/install/requirements/`,
+        hvOvercmt:  `${HARVESTER_DOCS}/vm/resource-overcommit/`,
+        gke:        'https://docs.cloud.google.com/kubernetes-engine/docs/concepts/plan-node-sizes',
+        hvSrcCpu:   'harvester/harvester pkg/installer/config/config.go:565 (calculateCPUReservedInMilliCPU)',
+        hvSrcCos:   'harvester/harvester pkg/installer/config/cos.go:35-49',
+        hvSrcLhim:  'harvester/harvester pkg/controller/master/setting/instance_manager_resources.go:71',
+        lhSetting:  'longhorn/longhorn-manager types/setting.go:1134 (GuaranteedInstanceManagerCPU)',
+        lhStorage:  'longhorn/longhorn-manager types/setting.go:649 (StorageReservedPercentageForDefaultDisk)',
+        lhBest:     'https://longhorn.io/docs/1.12.0/best-practices/',
+        kubevirt:   'https://kubevirt.io/user-guide/compute/resources_requests_and_limits/',
+        ocpMem:     'https://developers.redhat.com/blog/2025/01/31/memory-management-openshift-virtualization',
+        vmwMem:     'https://www.vmware.com/docs/perf-vsphere-memory_management',
+        ahvMem:     'https://www.nutanix.com/tech-center/blog/ahv-internals-memory-overcommit',
+        ahvCpu:     'https://www.nutanix.com/tech-center/blog/understanding-cpu-resource-management-in-nutanix-ahv',
+        pveReqs:    'https://www.cherryservers.com/blog/proxmox-hardware-requirements',
+        // Measured single-node vs 3-node Harvester v1.7.1 footprint (idle, 2 VMs,
+        // max density), reporting scheduler requests, pod usage and host
+        // consumption separately. Source of every 'measured' coefficient below.
+        benchmark:  'https://gist.github.com/Vicente-Cheng/ae8d5ce743f94c0c9a333574813bc777',
+        vcsaSizes:  'https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/8-0/vcenter-installation-and-setup/deploying-the-vcenter-server-appliance/vcenter-server-appliance-requirements/vcenter-server-appliance-hardware-requirements.html',
+        vsanSizing: 'https://techdocs.broadcom.com/us/en/vmware-cis/vsan/vsan/8-0/planning-and-deployment/designing-and-sizing-a-virtual-san-cluster/designing-and-sizing-virtual-san-hosts.html',
+        vsanMem:    'https://knowledge.broadcom.com/external/article?legacyId=2113954',
+        cephHw:     'https://docs.ceph.com/en/reef/start/hardware-recommendations/',
+        odfReqs:    'https://docs.redhat.com/en/documentation/red_hat_openshift_data_foundation/4.20/html/planning_your_deployment/infrastructure-requirements_rhodf',
+        ocpNodes:   'https://github.com/openshift/openshift-docs/blob/main/modules/master-node-sizing.adoc',
+        prismCentral: 'https://portal.nutanix.com/page/documents/details?targetId=Web-Console-Guide-Prism-v6_8:wc-cvm-memory-configuration-c.html',
+      };
+
+      /* Term A. Harvester derives its kubelet CPU reservation from the GKE
+         formula, then applies TWICE the result, split system:kube = 2:3.
+         Verified: a 16-core node yields 408m + 612m = 1020m, exactly matching
+         the worked example in the Harvester CPU-pinning docs.
+         Harvester writes ONLY system-reserved=cpu / kube-reserved=cpu — there
+         is no kubelet MEMORY reservation, which is why every RAM coefficient
+         below is tier 'estimate' rather than formula-derived. */
+      /* vCenter Server Appliance deployment sizes (vSphere 8). vCenter is a VM
+         on the cluster it manages, and its size is a step function of how much
+         it manages — so the model picks the row rather than pinning one size. */
+      const VCSA_SIZES = [
+        { name: 'Tiny',    hosts: 10,   vms: 100,   cpu: 2,  ram: 14 },
+        { name: 'Small',   hosts: 100,  vms: 1000,  cpu: 4,  ram: 21 },
+        { name: 'Medium',  hosts: 400,  vms: 4000,  cpu: 8,  ram: 30 },
+        { name: 'Large',   hosts: 1000, vms: 10000, cpu: 16, ram: 39 },
+        { name: 'X-Large', hosts: 2000, vms: 35000, cpu: 24, ram: 58 },
+      ];
+      const vcsaSize = (nodes, vms) =>
+        VCSA_SIZES.find(z => nodes <= z.hosts && vms <= z.vms) || VCSA_SIZES[VCSA_SIZES.length - 1];
+
+      const HARVESTER_MAX_PODS = 200;                  // Harvester ships >110, which triggers the +400m tier
+      const gkeReservedCpu = (threads, maxPods) => {
+        const t = Math.max(0, Math.floor(threads || 0));
+        if (t <= 0) return 0;
+        let r = 0.06;                                  // 6% of the 1st core
+        if (t > 1) r += 0.01;                          // 1% of the 2nd
+        if (t > 2) r += 2 * 0.005;                     // 0.5% of the next 2
+        if (t > 4) r += (t - 4) * 0.0025;              // 0.25% of the rest
+        if ((maxPods || 0) > 110) r += 0.4;            // +400 mCPU above 110 pods
+        return r;
+      };
+      const harvesterKubeletCpu = (threads) => 2 * gkeReservedCpu(threads, HARVESTER_MAX_PODS);
+
+      const HYPERVISORS = {
+        none: {
+          label: 'None — no platform overhead',
+          note: 'Raw spreadsheet parity: capacity is counted as-is. Existing saved configurations load with this selected so their numbers never change without you asking.',
+          kubeletCpu: null, perNode: [], infraNode: [], perVm: null, perDevice: null, storagePct: 0, addons: {},
+        },
+
+        /* Harvester coefficients are calibrated against a measured single-node vs
+           3-node benchmark (Harvester v1.7.1) — see OVERHEAD_SRC.benchmark and
+           METHODOLOGY.md § 7a.9 for the derivation. Figures are SCHEDULER
+           REQUESTS (what blocks VM placement), except the kubelet reserve, which
+           comes out of capacity before the scheduler, and lines marked
+           basis:'physical', which are consumption and never enter the totals. */
+        harvester: {
+          label: 'SUSE Virtualization (Harvester)',
+          depth: 'calibrated',
+          depthNote: 'Every line is calibrated against a measured single-node vs 3-node cluster; CPU reservations are traced to vendor source code.',
+          note: 'RKE2 + KubeVirt + Longhorn. The Longhorn instance-manager reservation dominates CPU overhead — it is 12% of node allocatable, so it grows with host size. Control-plane services are counted once per cluster, not per node: a 3-node cluster measures 2.19x a single node, not 3x.',
+          kubeletCpu: 'harvester',
+          perNode: [
+            { key: 'lhim',  label: 'Longhorn instance-manager (12% of allocatable)', cpuPct: 0.12, ram: 0,
+              tier: 'verified', src: `${OVERHEAD_SRC.hvSrcCos}; ${OVERHEAD_SRC.lhSetting}` },
+            // Measured per-node request share P = 3421 MiB / Pc = 1879m, split
+            // across the node-local components by their observed proportions.
+            { key: 'agent', label: 'RKE2 agent, containerd, canal/multus, node-exporter', cpu: 1.03, ram: 1.83,
+              tier: 'measured', src: `${OVERHEAD_SRC.benchmark}; ${OVERHEAD_SRC.hvReqs}` },
+            { key: 'virt',  label: 'KubeVirt virt-handler + Harvester node agents', cpu: 0.59, ram: 0.73,
+              tier: 'measured', src: `${OVERHEAD_SRC.benchmark}; ${OVERHEAD_SRC.kubevirt}` },
+            { key: 'lhmgr', label: 'Longhorn manager, CSI plugin, engine images', cpu: 0.26, ram: 0.78,
+              tier: 'measured', src: `${OVERHEAD_SRC.benchmark}; ${OVERHEAD_SRC.lhBest}` },
+            /* PHYSICAL, not a request. Platform pods routinely use more than
+               they request, and the OS/kernel is outside pods entirely. From the
+               host-consumed (MemTotal − MemAvailable) fit: 12.8 GiB at 1 node,
+               26.2 GiB at 3 → P = 6.71 GiB/node, S = 6.09 GiB cluster-wide. */
+            { key: 'physNode', label: 'OS, kernel and platform pod RSS', basis: 'physical', cpu: 0, ram: 6.71,
+              tier: 'measured', src: OVERHEAD_SRC.benchmark },
+          ],
+          // Harvester's control plane is a CLUSTER singleton, not a per-node
+          // cost: Rancher, CDI, the KubeVirt/Harvester operators and the
+          // apiserver/etcd/ingress leader skew all land once. Measured
+          // S = 2324 MiB / Sc = 991m.
+          cluster: [
+            { key: 'cp',    label: 'etcd + apiserver / scheduler / controller-manager (leader share)', cpu: 0.55, ram: 1.19,
+              tier: 'measured', src: `${OVERHEAD_SRC.benchmark}; ${OVERHEAD_SRC.hvReqs}` },
+            { key: 'hvctl', label: 'Harvester controllers, webhooks, UI, CDI, vm-import', cpu: 0.24, ram: 0.62,
+              tier: 'measured', src: `${OVERHEAD_SRC.benchmark}; ${OVERHEAD_SRC.hvReqs}` },
+            { key: 'rancher', label: 'Embedded Rancher (cattle / fleet / CAPI)', cpu: 0.20, ram: 0.46,
+              tier: 'measured', src: OVERHEAD_SRC.benchmark },
+            // PHYSICAL counterpart of the singleton services — see physNode above.
+            { key: 'physCluster', label: 'Cluster services RSS beyond their requests', basis: 'physical', cpu: 0, ram: 6.09,
+              tier: 'measured', src: OVERHEAD_SRC.benchmark },
+          ],
+          infraNode: [],
+          infraCount: 0,
+          /* Term C: KubeVirt lineage, recalibrated. The published Red Hat form is
+             kept, but the fixed term is solved from the measured 421 MiB request
+             overhead of a 2 vCPU / 2 GiB guest:
+               421 − 0.002×2048 − 8×2 = 400.9 MiB.
+             One data point, so ramFactor and ramPerVcpuMiB remain unvalidated.
+             cpuMilli is the launcher CPU beyond vCPU/overcommit (205m measured
+             per VM, less 2000m/16 at Harvester's default 1600% ratio). */
+          perVm: { ramFactor: 1.002, ramFixedMiB: 400, ramPerVcpuMiB: 8, cpuMilli: 80, tier: 'measured',
+                   src: `${OVERHEAD_SRC.benchmark}; ${OVERHEAD_SRC.ocpMem}; ${OVERHEAD_SRC.kubevirt}` },
+          // PHYSICAL, not a request: one Longhorn replica engine per VM disk.
+          // 60273 MiB / (148 VMs x 3 replicas) = 135.8 MiB per replica.
+          perVmDiskPhysical: { ramMiB: 136, tier: 'measured', src: OVERHEAD_SRC.benchmark },
+          // Measured virt-launcher RSS for a 2 GiB guest — physical only, used by
+          // the physical-capacity design rule, never by the sizing totals.
+          perVmPhysicalRamMiB: 683,
+          perDevice: { ramGiB: 1, cpu: 0, tier: 'estimate', src: OVERHEAD_SRC.ocpMem },
+          // Term E: Harvester overrides Longhorn's own 30% default down to 0%.
+          storagePct: 0, storagePctMax: 30, storageTier: 'verified', storageSrc: `${OVERHEAD_SRC.hvSrcCos}; ${OVERHEAD_SRC.lhStorage}`,
+          /* Add-on coefficients stay ESTIMATE: the benchmark ran with neither
+             rancher-monitoring nor rancher-logging installed, so none of these
+             are validated by it. Their control-plane halves move to the
+             `cluster` scope for the same reason the core ones did — Prometheus,
+             Grafana and the Fluentd aggregator are singletons. */
+          addons: {
+            monitoring: { label: 'rancher-monitoring (Prometheus / Grafana)', on: true,
+                          perNode: { cpu: 0.2, ram: 1.5 }, cluster: { cpu: 0.5, ram: 3 },
+                          tier: 'estimate', src: OVERHEAD_SRC.hvReqs },
+            logging:    { label: 'rancher-logging (Fluentd / Fluent Bit)', on: false,
+                          perNode: { cpu: 0.15, ram: 1 }, cluster: { cpu: 0.2, ram: 1 },
+                          tier: 'estimate', src: OVERHEAD_SRC.hvReqs },
+            lhV2:       { label: 'Longhorn V2 data engine (SPDK + 2 GiB huge pages)', on: false,
+                          perNode: { cpuPct: 0.12, ram: 2 },
+                          tier: 'verified', src: `${OVERHEAD_SRC.lhSetting}; ${OVERHEAD_SRC.lhBest}` },
+            gpuStack:   { label: 'pcidevices-controller + NVIDIA driver toolkit', on: 'auto',
+                          perNode: { cpu: 0.5, ram: 1.5 },
+                          tier: 'estimate', src: OVERHEAD_SRC.hvReqs },
+            // Harvester's OWN embedded Rancher is already in the `cluster` list
+            // above. This add-on is the extra agent stack when the cluster is
+            // additionally imported into an EXTERNAL Rancher — not a duplicate.
+            rancher:    { label: 'Imported into an external Rancher (extra cattle-cluster-agent)', on: true,
+                          perNode: { cpu: 0.05, ram: 0.3 }, cluster: { cpu: 0.2, ram: 1 },
+                          tier: 'estimate', src: OVERHEAD_SRC.hvReqs },
+          },
+        },
+
+        ocpvirt: {
+          label: 'Red Hat OpenShift Virtualization',
+          depth: 'modelled',
+          depthGaps: ['resident memory beyond requests (ODF/Ceph), so the physical-capacity rule is not enforced'],
+          note: 'KubeVirt lineage like Harvester. Red Hat publishes both the per-node core requirement and the per-VM memory formula.',
+          kubeletCpu: null,
+          perNode: [
+            { key: 'virt', label: 'OpenShift Virtualization management workloads (+2 cores/node)', cpu: 2, ram: 4,
+              tier: 'verified', src: OVERHEAD_SRC.ocpMem },
+            { key: 'ocp',  label: 'OpenShift node agents (CRI-O, OVN-Kubernetes, monitoring)', cpu: 1, ram: 4,
+              tier: 'estimate', src: OVERHEAD_SRC.ocpMem },
+          ],
+          infraNode: [
+            // Red Hat's published control-plane minimum: 4 vCPU / 16 GB per
+            // master, and OpenShift requires three.
+            { key: 'cp', label: 'Control plane node (etcd + apiserver, 4 vCPU / 16 GB minimum)', cpu: 4, ram: 16,
+              tier: 'verified', src: OVERHEAD_SRC.ocpNodes },
+          ],
+          infraCount: 3,
+          // Same KubeVirt launcher CPU as Harvester; Red Hat does not publish a
+          // figure, so the Harvester measurement is carried across.
+          perVm: { ramFactor: 1.002, ramFixedMiB: 146, ramPerVcpuMiB: 8, cpuMilli: 80, tier: 'verified', src: OVERHEAD_SRC.ocpMem },
+          perDevice: { ramGiB: 1, cpu: 0, tier: 'verified', src: OVERHEAD_SRC.ocpMem },
+          storagePct: 0, storagePctMax: 30, storageTier: 'estimate', storageSrc: OVERHEAD_SRC.ocpMem,
+          addons: {
+            /* ODF/Ceph: Red Hat publishes "2 CPU and 5 GiB per device added to a
+               storage node". Converted to per-TB assuming ~4 TB devices, since
+               the tool knows host capacity rather than device count. */
+            odf: { label: 'OpenShift Data Foundation (Ceph) storage nodes', on: true, requiresLocalStorage: true,
+                   perNode: { cpu: 1.0, ram: 2, cpuPerTb: 0.5, ramPerTb: 1.25 },
+                   tier: 'estimate', src: OVERHEAD_SRC.odfReqs },
+          },
+        },
+
+        vsphere: {
+          label: 'VMware vSphere / ESXi',
+          depth: 'modelled',
+          depthNote: 'vCenter sized from the published deployment-size table; vSAN from the documented memory formula. ESXi has no scheduler-request layer, so requests and physical consumption are the same thing here.',
+          note: 'Thin hypervisor: a modest fixed VMkernel footprint per host, with per-VM overhead that grows with configured RAM and vCPU count.',
+          kubeletCpu: null,
+          perNode: [
+            { key: 'vmk', label: 'VMkernel, device drivers, host daemons', cpu: 0.5, ram: 6,
+              tier: 'estimate', src: OVERHEAD_SRC.vmwMem },
+          ],
+          /* vCenter is a VM, normally hosted on the cluster it manages, and it
+             is sized from a published table by cluster size — see vcsaSize().
+             Placeholder values here; the real ones are filled in per config. */
+          cluster: [
+            { key: 'vcsa', label: 'vCenter Server Appliance', cpu: 4, ram: 21, sizedByCluster: 'vcsa',
+              tier: 'verified', src: OVERHEAD_SRC.vcsaSizes },
+          ],
+          infraNode: [],
+          infraCount: 0,
+          perVm: { ramFactor: 1.005, ramFixedMiB: 100, ramPerVcpuMiB: 20, tier: 'estimate', src: OVERHEAD_SRC.vmwMem },
+          perDevice: { ramGiB: 1, cpu: 0, tier: 'estimate', src: OVERHEAD_SRC.vmwMem },
+          storagePct: 0, storagePctMax: 30, storageTier: 'estimate', storageSrc: OVERHEAD_SRC.vmwMem,
+          addons: {
+            /* vSAN OSA: 3 GB base + 500 MB per disk group + 7 MB per GB of cache
+               tier (all-flash). Cache is conventionally ~10% of capacity, so
+               7 MB/GB of cache ≈ 0.7 GB per TB of raw capacity. Broadcom's own
+               guidance is to plan roughly 10% of host CPU for vSAN. */
+            vsan: { label: 'vSAN storage service', on: true, requiresLocalStorage: true,
+                    perNode: { cpuPct: 0.10, ram: 4, ramPerTb: 0.7 },
+                    tier: 'estimate', src: `${OVERHEAD_SRC.vsanMem}; ${OVERHEAD_SRC.vsanSizing}` },
+          },
+        },
+
+        ahv: {
+          label: 'Nutanix AHV',
+          depth: 'modelled',
+          depthNote: 'The CVM and Prism Central are the overhead, and both are modelled. AHV has no scheduler-request layer, so requests and physical consumption are the same thing here.',
+          note: 'The Controller VM (CVM) is the overhead: a fixed, sizeable per-host reservation. AHV itself is light, and it cannot overcommit memory.',
+          kubeletCpu: null,
+          noRamOvercommit: true,
+          perNode: [
+            { key: 'cvm', label: 'Controller VM (CVM)', cpu: 8, ram: 32,
+              tier: 'estimate', src: OVERHEAD_SRC.ahvMem },
+            { key: 'ahv', label: 'AHV hypervisor (<1% of host CPU)', cpuPct: 0.01, ram: 2,
+              tier: 'estimate', src: OVERHEAD_SRC.ahvCpu },
+          ],
+          // Prism Central is a VM on the cluster. "Small" single-VM instance;
+          // a 3-VM scale-out deployment triples it.
+          cluster: [
+            { key: 'prism', label: 'Prism Central (small, single VM)', cpu: 6, ram: 26,
+              tier: 'estimate', src: OVERHEAD_SRC.prismCentral },
+          ],
+          infraNode: [],
+          infraCount: 0,
+          perVm: { ramFactor: 1.0, ramFixedMiB: 100, ramPerVcpuMiB: 8, tier: 'estimate', src: OVERHEAD_SRC.ahvMem },
+          perDevice: { ramGiB: 1, cpu: 0, tier: 'estimate', src: OVERHEAD_SRC.ahvMem },
+          storagePct: 0, storagePctMax: 30, storageTier: 'estimate', storageSrc: OVERHEAD_SRC.ahvMem,
+          addons: {
+            prismScale: { label: 'Prism Central scale-out (3 VMs instead of 1)', on: false,
+                          cluster: { cpu: 12, ram: 52 },
+                          tier: 'estimate', src: OVERHEAD_SRC.prismCentral },
+          },
+        },
+
+        proxmox: {
+          label: 'Proxmox VE',
+          depth: 'modelled',
+          depthNote: 'Host, cluster and Ceph storage services are modelled. KVM has no scheduler-request layer, so requests and physical consumption are the same thing here.',
+          note: 'Light base footprint. If the host uses ZFS, the ARC cache is the dominant term — enable the toggle and size it deliberately.',
+          kubeletCpu: null,
+          perNode: [
+            { key: 'pve', label: 'Proxmox VE host OS + services', cpu: 0.5, ram: 4,
+              tier: 'estimate', src: OVERHEAD_SRC.pveReqs },
+          ],
+          // corosync / pve-cluster / pvedaemon: a small, genuinely cluster-wide
+          // cost rather than a per-node one.
+          cluster: [
+            { key: 'pvecluster', label: 'Cluster services (corosync, pve-cluster, pvedaemon)', cpu: 0.5, ram: 1,
+              tier: 'estimate', src: OVERHEAD_SRC.pveReqs },
+          ],
+          infraNode: [],
+          infraCount: 0,
+          perVm: { ramFactor: 1.015, ramFixedMiB: 80, ramPerVcpuMiB: 8, tier: 'estimate', src: OVERHEAD_SRC.pveReqs },
+          perDevice: { ramGiB: 1, cpu: 0, tier: 'estimate', src: OVERHEAD_SRC.pveReqs },
+          storagePct: 0, storagePctMax: 30, storageTier: 'estimate', storageSrc: OVERHEAD_SRC.pveReqs,
+          addons: {
+            zfsArc: { label: 'ZFS ARC cache (capped at 10% of host RAM)', on: false,
+                      perNode: { ramPct: 0.10 }, tier: 'estimate', src: OVERHEAD_SRC.pveReqs },
+            /* Ceph: osd_memory_target defaults to 4 GiB per OSD, and the Ceph
+               hardware guide recommends provisioning ~8 GiB per BlueStore OSD
+               once recovery is allowed for. Converted to per-TB assuming ~4 TB
+               OSDs. MON/MGR (1-2 GB each) sit in the cluster scope. */
+            ceph:   { label: 'Ceph OSDs (4 GiB per OSD; ~1 GiB per TB raw)', on: true, requiresLocalStorage: true,
+                      perNode: { cpu: 0.5, ram: 1, cpuPerTb: 0.25, ramPerTb: 1 },
+                      cluster: { cpu: 0.5, ram: 4 },
+                      tier: 'estimate', src: OVERHEAD_SRC.cephHw },
+          },
+        },
+      };
+
+      /* Model DEPTH, which is a different thing from coefficient provenance.
+         A tier says how well one number is sourced; this says how much of a
+         platform is modelled at all. Harvester is calibrated line-by-line
+         against a measured cluster; the others are vendor-doc sketches with
+         whole categories still missing, which makes their totals systematically
+         LOW and not comparable to Harvester's. Saying so is the honest
+         alternative to silently shipping a 28x apples-to-oranges gap. */
+      const DEPTH = {
+        calibrated: { label: 'Calibrated', cls: 'border-suse-green/40 text-suse-green bg-suse-green/10',
+                      blurb: 'Every term is modelled and calibrated against measurements from a real cluster.' },
+        modelled:   { label: 'Modelled', cls: 'border-sky-500/40 text-sky-400 bg-sky-500/10',
+                      blurb: 'All significant categories are modelled — management plane, storage services, per-node and per-VM terms — but the coefficients come from vendor documentation rather than measurement, so expect them to be less precise than a calibrated platform.' },
+        partial:    { label: 'Partial model', cls: 'border-amber-500/40 text-amber-400 bg-amber-500/10',
+                      blurb: 'Core terms modelled from vendor documentation; some categories are not yet covered, so the total is a floor rather than an estimate.' },
+        indicative: { label: 'Indicative only', cls: 'border-amber-500/40 text-amber-400 bg-amber-500/10',
+                      blurb: 'A sketch from vendor documentation. Several significant categories are not modelled at all, so the total understates real overhead — do not compare it against a calibrated platform.' },
+      };
+      const HYPERVISOR_ORDER = ['harvester', 'ocpvirt', 'vsphere', 'ahv', 'proxmox', 'none'];
+      /* Own-property lookup: imported JSON is untrusted, and a plain
+         `HYPERVISORS[key]` is truthy for '__proto__' / 'constructor'. */
+      const hypervisorKey = (k) =>
+        (typeof k === 'string' && Object.prototype.hasOwnProperty.call(HYPERVISORS, k)) ? k : 'none';
+
+      /* ---- platform overhead ----
+         Pure: the sidebar, the scenario table and the PDF all call this, so
+         there is exactly one implementation of the numbers.
+
+         Two outputs, because the two kinds of overhead enter the sizing math
+         at different points:
+           uniform*  every node pays it   → subtracted inside capOf()
+           lump*     the fleet pays it    → added to demand
+         The infra-node term is a lump rather than a per-host subtraction on
+         purpose: capOf() is per host TYPE and hostCaps multiplies by count,
+         so it cannot express "3 of these 5 identical hosts carry extra". For
+         auto mode the two forms are equivalent —
+           N*(cap-uniform) - 3*infra >= demand  <=>  N >= (demand + 3*infra)/(cap-uniform)
+         — and the lump form is the only correct one for pool mode, where
+         positional capacity is unrepresentable. */
+      const num = (x, fallback = 0) => (Number.isFinite(+x) ? +x : fallback);
+
+      const computePlatformOverhead = (rawKey, cfg, ctx) => {
+        const empty = { uniformCpu: 0, uniformRam: 0, uniformStoragePct: 0, lumpCpu: 0, lumpRam: 0,
+                        perVmRam: 0, clusterCpu: 0, clusterRam: 0, physPerNodeRam: 0, physLumpRam: 0,
+                        lines: [], platform: 'none', label: HYPERVISORS.none.label,
+                        noRamOvercommit: false, infraCount: 0, nodeCount: 0,
+                        depth: null, depthNote: null, depthGaps: [] };
+        const platformKey = hypervisorKey(rawKey);
+        const P = HYPERVISORS[platformKey];
+        if (platformKey === 'none' || (cfg && cfg.auto === false)) return empty;
+        ctx = ctx || {};
+
+        const nodeCount   = Math.max(0, num(ctx.nodeCount));
+        const hostThreads = Math.max(0, num(ctx.hostThreads));
+        const hostRam     = Math.max(0, num(ctx.hostRam));
+        const hostTb      = Math.max(0, num(ctx.hostStorage)) / 1024;   // raw local disk, TB
+        const vmCount     = Math.max(0, num(ctx.vmCount));
+        const vmRam       = Math.max(0, num(ctx.vmRam));       // total guest RAM, GB
+        const vmVcpu      = Math.max(0, num(ctx.vmVcpu));      // total guest vCPU
+        const devices     = Math.max(0, num(ctx.devices));     // GPUs / SR-IOV VFs
+        const ov          = (cfg && cfg.overrides) || {};
+        const addonsOn    = (cfg && cfg.addons) || {};
+        const lines = [];
+
+        // A resolved coefficient: a user override always wins over the table.
+        const val = (key, field, fallback) => num(ov[`${key}.${field}`], fallback);
+
+        /* ---- Term A: kubelet reserve (CPU only, Harvester-specific) ----
+           This is the ONLY term that comes out of node capacity before the
+           scheduler sees it. Everything else below is a pod *request*, which is
+           what actually blocks VM placement — see METHODOLOGY.md § 7a.1. */
+        let uniformCpu = 0, uniformRam = 0;
+        let kubeletCpu = 0;
+        if (P.kubeletCpu === 'harvester' && hostThreads > 0) {
+          kubeletCpu = harvesterKubeletCpu(hostThreads);
+          uniformCpu += kubeletCpu;
+          lines.push({ key: 'kubelet', label: `Kubelet reserve (system + kube, ${Math.round(kubeletCpu * 1000)}m)`,
+                       scope: 'per-node', basis: 'reserve', cpu: kubeletCpu, ram: 0, tier: 'verified',
+                       src: `${OVERHEAD_SRC.hvCpuPin}; ${OVERHEAD_SRC.hvSrcCpu}; ${OVERHEAD_SRC.gke}` });
+        }
+        // Allocatable = capacity − kubelet reserve. Percentage-of-node terms are
+        // percentages of ALLOCATABLE, not capacity (Longhorn reads
+        // Status.Allocatable.Cpu()), so they must be based on this.
+        const allocThreads = Math.max(0, hostThreads - kubeletCpu);
+
+        // ---- Term B: per-node platform pods (every node) ----
+        let physPerNodeRam = 0;
+        const addPerNode = (item, labelPrefix) => {
+          // Storage services scale with the disks in the host, so they are
+          // expressed per TB of raw local disk as well as flat + %-of-node.
+          const cpu = num(val(item.key, 'cpu', item.cpu)) + num(item.cpuPct) * allocThreads
+                    + num(val(item.key, 'cpuPerTb', item.cpuPerTb)) * hostTb;
+          const ram = num(val(item.key, 'ram', item.ram)) + num(item.ramPct) * hostRam
+                    + num(val(item.key, 'ramPerTb', item.ramPerTb)) * hostTb;
+          if (cpu <= 0 && ram <= 0) return;
+          if (item.basis === 'physical') physPerNodeRam += ram;
+          else { uniformCpu += cpu; uniformRam += ram; }
+          lines.push({ key: item.key, label: labelPrefix ? `${labelPrefix}${item.label}` : item.label,
+                       scope: 'per-node', basis: item.basis || 'request', cpu, ram, tier: item.tier, src: item.src });
+        };
+        (P.perNode || []).forEach(i => addPerNode(i));
+
+        // ---- Term B: infra-node extra (first N nodes only) ----
+        // Genuinely per-control-plane-node components (OpenShift Virt's published
+        // "+2 cores per node"). Harvester's singletons use the `cluster` scope
+        // below instead — they do NOT replicate per node.
+        const infraCount = Math.min(num(P.infraCount), nodeCount || num(P.infraCount));
+        let lumpCpu = 0, lumpRam = 0;
+        const addInfra = (item, labelPrefix) => {
+          const cpu = num(val(`infra.${item.key}`, 'cpu', item.cpu)) + num(item.cpuPct) * allocThreads;
+          const ram = num(val(`infra.${item.key}`, 'ram', item.ram)) + num(item.ramPct) * hostRam;
+          if ((cpu <= 0 && ram <= 0) || infraCount <= 0) return;
+          lumpCpu += cpu * infraCount; lumpRam += ram * infraCount;
+          lines.push({ key: `infra.${item.key}`, label: labelPrefix ? `${labelPrefix}${item.label}` : item.label,
+                       scope: 'infra-node', basis: 'request', nodes: infraCount, cpu: cpu * infraCount, ram: ram * infraCount,
+                       perNodeCpu: cpu, perNodeRam: ram, tier: item.tier, src: item.src });
+        };
+        (P.infraNode || []).forEach(i => addInfra(i));
+
+        /* ---- Term B': cluster singletons (counted ONCE) ----
+           Rancher, CDI, the KubeVirt and Harvester operators and the leader-side
+           apiserver/etcd/ingress skew do not replicate with node count. Measured:
+           a 3-node cluster costs 2.19x a single node, not 3x. */
+        let clusterCpu = 0, clusterRam = 0, physLumpRamCluster = 0;
+        const addCluster = (item, labelPrefix) => {
+          // Some cluster services are sized from a published step table rather
+          // than a flat number (vCenter). Resolve the row for this cluster.
+          if (item.sizedByCluster === 'vcsa') {
+            const z = vcsaSize(nodeCount || 1, vmCount);
+            item = { ...item, cpu: z.cpu, ram: z.ram, label: `${item.label} — ${z.name} (${z.cpu} vCPU / ${z.ram} GB)` };
+          }
+          const cpu = num(val(`cluster.${item.key}`, 'cpu', item.cpu)) + num(item.cpuPct) * allocThreads
+                    + num(val(`cluster.${item.key}`, 'cpuPerTb', item.cpuPerTb)) * hostTb;
+          const ram = num(val(`cluster.${item.key}`, 'ram', item.ram)) + num(item.ramPct) * hostRam
+                    + num(val(`cluster.${item.key}`, 'ramPerTb', item.ramPerTb)) * hostTb;
+          if (cpu <= 0 && ram <= 0) return;
+          if (item.basis === 'physical') physLumpRamCluster += ram;
+          else { clusterCpu += cpu; clusterRam += ram; lumpCpu += cpu; lumpRam += ram; }
+          lines.push({ key: `cluster.${item.key}`, label: labelPrefix ? `${labelPrefix}${item.label}` : item.label,
+                       scope: 'cluster', basis: item.basis || 'request', cpu, ram, tier: item.tier, src: item.src });
+        };
+        (P.cluster || []).forEach(i => addCluster(i));
+
+        // ---- Add-ons feed Terms B / B' (all three scopes) ----
+        Object.entries(P.addons || {}).forEach(([key, a]) => {
+          const dflt = a.on === 'auto' ? devices > 0 : !!a.on;
+          const on = addonsOn[key] === undefined ? dflt : !!addonsOn[key];
+          // A hyperconverged storage service does not exist when the VM disks
+          // live on an external array.
+          if (!on || (a.requiresLocalStorage && ctx.externalStorage)) return;
+          if (a.perNode)   addPerNode({ key: `addon.${key}`, label: a.label, ...a.perNode, tier: a.tier, src: a.src }, 'Add-on: ');
+          if (a.infraNode) addInfra({ key: `addon.${key}`, label: `${a.label} (control plane)`, ...a.infraNode, tier: a.tier, src: a.src }, 'Add-on: ');
+          if (a.cluster)   addCluster({ key: `addon.${key}`, label: `${a.label} (cluster-wide)`, ...a.cluster, tier: a.tier, src: a.src }, 'Add-on: ');
+        });
+
+        // ---- Term C: per-VM hypervisor overhead ----
+        let perVmRam = 0, physLumpRam = 0;
+        if (P.perVm && vmCount > 0) {
+          const f  = num(val('perVm', 'ramFactor',   P.perVm.ramFactor), 1);
+          const fx = num(val('perVm', 'ramFixedMiB', P.perVm.ramFixedMiB));
+          const pv = num(val('perVm', 'ramPerVcpuMiB', P.perVm.ramPerVcpuMiB));
+          const pc = num(val('perVm', 'cpuMilli', P.perVm.cpuMilli));   // launcher CPU beyond vCPU/overcommit
+          // (factor-1) applies to guest RAM; the fixed + per-vCPU parts are MiB.
+          const ram = (f - 1) * vmRam + (fx * vmCount + pv * vmVcpu) / 1024;
+          const cpu = (pc * vmCount) / 1000;
+          if (ram > 0 || cpu > 0) {
+            perVmRam = ram; lumpRam += ram; lumpCpu += cpu;
+            lines.push({ key: 'perVm', label: `Per-VM overhead — ${vmCount} VM(s) (${f} x RAM + ${fx} MiB + ${pv} MiB/vCPU${pc ? ` + ${pc}m CPU` : ''})`,
+                         scope: 'per-vm', basis: 'request', cpu, ram, tier: P.perVm.tier, src: P.perVm.src });
+          }
+        }
+
+        /* ---- Term C': storage-engine memory per VM disk (PHYSICAL) ----
+           Longhorn runs one replica engine per VM disk inside the per-node
+           instance-manager pod. That memory is consumed, not requested, so it
+           does NOT reduce schedulable capacity — but it is real RAM and a host
+           sized without it can OOM. Tracked separately and surfaced as its own
+           design rule. LVM- or externally-backed disks do not pay it. */
+        if (P.perVmDiskPhysical && vmCount > 0 && !ctx.externalStorage) {
+          const replicas = Math.max(1, num(ctx.replicas, 1));
+          const perReplicaMiB = num(val('perVmDisk', 'ramMiB', P.perVmDiskPhysical.ramMiB));
+          const ram = (perReplicaMiB * replicas * vmCount) / 1024;
+          if (ram > 0) {
+            physLumpRam += ram;
+            lines.push({ key: 'perVmDisk', basis: 'physical', scope: 'per-vm',
+                         label: `Storage engine RAM — ${perReplicaMiB} MiB x ${replicas} replica(s) x ${vmCount} VM(s)`,
+                         cpu: 0, ram, tier: P.perVmDiskPhysical.tier, src: P.perVmDiskPhysical.src });
+          }
+        }
+
+        // ---- Term D: per-device (GPU / SR-IOV passthrough) ----
+        if (P.perDevice && devices > 0) {
+          const ram = num(val('perDevice', 'ramGiB', P.perDevice.ramGiB)) * devices;
+          const cpu = num(val('perDevice', 'cpu', P.perDevice.cpu)) * devices;
+          if (ram > 0 || cpu > 0) {
+            lumpRam += ram; lumpCpu += cpu;
+            lines.push({ key: 'perDevice', label: `Passthrough devices — ${devices} GPU / SR-IOV VF`,
+                         scope: 'per-device', cpu, ram, tier: P.perDevice.tier, src: P.perDevice.src });
+          }
+        }
+
+        // ---- Term E: per-node storage reserve (% of raw disk) ----
+        const storagePct = Math.min(num(P.storagePctMax, 100),
+                                    Math.max(0, num(ov['storage.pct'], num(P.storagePct)))) / 100;
+        if (storagePct > 0) {
+          lines.push({ key: 'storage', label: `Storage reserve (${(storagePct * 100).toFixed(0)}% of raw disk)`,
+                       scope: 'per-node', cpu: 0, ram: 0, storagePct,
+                       tier: P.storageTier, src: P.storageSrc });
+        }
+
+        return { uniformCpu, uniformRam, uniformStoragePct: storagePct, lumpCpu, lumpRam, perVmRam,
+                 clusterCpu, clusterRam, physPerNodeRam,
+                 // Fleet-wide physical RAM: storage engines + cluster-service RSS.
+                 physLumpRam: physLumpRam + physLumpRamCluster,
+                 // Physical RAM per VM (RSS, not the request) — used only by the
+                 // physical-capacity design rule, never by the sizing totals.
+                 physPerVmRamMiB: num(P.perVmPhysicalRamMiB),
+                 lines, platform: platformKey, label: P.label, note: P.note,
+                 noRamOvercommit: !!P.noRamOvercommit, infraCount, nodeCount,
+                 depth: P.depth || null, depthNote: P.depthNote || null, depthGaps: P.depthGaps || [] };
+      };
+
       // Fill in any top-level keys missing from older saved/imported configs.
       const migrateState = (s) => {
         if (!s || typeof s !== 'object') return s;
@@ -438,8 +978,21 @@
         }
         hosts = hosts.map((h, i) => ({ ...tpl, ...h, id: h.id || uid(), name: h.name || `Host Type ${i + 1}`, primary: !!h.primary }));
         if (!hosts.some(h => h.primary)) hosts[0].primary = true;
+        /* Platform overhead (added v2.5). A config saved before this feature has
+           no `platform` key, so it migrates to 'none' — zero overhead, numbers
+           identical to what that file produced when it was saved. Nothing changes
+           under the user silently; the Virtualization tab offers to switch. New
+           configs get 'harvester' from defaultVirt(), which is safe because
+           defaultState() is returned WITHOUT passing through migrateState. */
+        const curOv = (cur.overhead && typeof cur.overhead === 'object') ? cur.overhead : {};
         s.virtualization = {
           mode: cur.mode === 'pool' ? 'pool' : 'auto',
+          platform: hypervisorKey(cur.platform),
+          // Deep enough to survive a partially-written overhead object: a plain
+          // spread would let `{auto:false}` blank out every add-on default.
+          overhead: { ...d.overhead, ...curOv,
+                      addons:    { ...d.overhead.addons,    ...(curOv.addons    || {}) },
+                      overrides: { ...d.overhead.overrides, ...(curOv.overrides || {}) } },
           hosts,
           overcommit: { ...d.overcommit, ...cur.overcommit },
           cluster: { ...d.cluster, ...cur.cluster },
@@ -694,6 +1247,26 @@
         const setVirtSection = (section, field, value) =>
           setState(s => ({ ...s, virtualization: { ...s.virtualization, [section]: { ...s.virtualization[section], [field]: value } } }));
         const setVirtMode = (mode) => setState(s => ({ ...s, virtualization: { ...s.virtualization, mode } }));
+        /* Platform selection deliberately touches ONLY the overhead model. It
+           never rewrites overcommit: the published platform ratios (Harvester
+           1600%/150%) are limits, not sizing targets, and the user may have
+           tuned theirs. Conflicts surface as design-rule checks instead. */
+        const setVirtPlatform = (platform) => setState(s => ({
+          ...s, virtualization: { ...s.virtualization, platform,
+            overhead: { ...s.virtualization.overhead, addons: {}, overrides: {}, dismissed: true } } }));
+        const setOverheadFlag = (field, value) => setState(s => ({
+          ...s, virtualization: { ...s.virtualization, overhead: { ...s.virtualization.overhead, [field]: value } } }));
+        const setOverheadAddon = (key, on) => setState(s => ({
+          ...s, virtualization: { ...s.virtualization,
+            overhead: { ...s.virtualization.overhead, addons: { ...s.virtualization.overhead.addons, [key]: on } } } }));
+        // Overrides are floats (percentages, fractional cores) — deliberately
+        // NOT routed through updateHost/updateVirtVm, which parseInt everything.
+        const setOverheadOverride = (key, value) => setState(s => {
+          const overrides = { ...s.virtualization.overhead.overrides };
+          if (value === null || value === '' || !Number.isFinite(+value)) delete overrides[key];
+          else overrides[key] = +value;
+          return { ...s, virtualization: { ...s.virtualization, overhead: { ...s.virtualization.overhead, overrides } } };
+        });
         const addHost = () => setState(s => { const v = s.virtualization; return { ...s, virtualization: { ...v, hosts: [...v.hosts, defaultHostType(v.hosts.length + 1)] } }; });
         const updateHost = (id, field, value) => setState(s => ({ ...s, virtualization: { ...s.virtualization, hosts: s.virtualization.hosts.map(h => h.id === id ? { ...h, [field]: field === 'name' ? value : Math.max(0, parseInt(value, 10) || 0) } : h) } }));
         const removeHost = (id) => setState(s => { const v = s.virtualization; if (v.hosts.length <= 1) return s; let hosts = v.hosts.filter(h => h.id !== id); if (!hosts.some(h => h.primary)) hosts = hosts.map((h, i) => i === 0 ? { ...h, primary: true } : h); return { ...s, virtualization: { ...v, hosts } }; });
@@ -771,13 +1344,34 @@
             else { agg.nonGpuVcpu += m.cpu; agg.nonGpuRam += m.ram; }
           });
 
+          /* Platform overhead. Per-node terms shrink each host's usable capacity
+             (applied in capOf below); infra-node, per-VM and per-device terms are
+             fleet-wide lumps added to demand. Per-VM overhead is deliberately
+             OUTSIDE the overcommit divide — it is real host memory that cannot be
+             overcommitted away. `ohFor(n)` is called with a node-count estimate;
+             auto mode iterates it to a fixed point (see below). */
+          const platformKey = hypervisorKey(v.platform);
+          const ohCfg = v.overhead || {};
+          const primaryRaw = v.hosts.find(h => h.primary) || v.hosts[0];
+          const primaryThreads = Math.max(1, primaryRaw.sockets * primaryRaw.coresPerSocket * primaryRaw.threadsPerCore);
+          const ohFor = (nodeCount, host) => computePlatformOverhead(platformKey, ohCfg, {
+            nodeCount,
+            hostThreads: host ? Math.max(1, host.sockets * host.coresPerSocket * host.threadsPerCore) : primaryThreads,
+            hostRam: host ? host.ram : primaryRaw.ram,
+            hostStorage: host ? host.storage : primaryRaw.storage,
+            vmCount: agg.vms, vmRam: agg.ram, vmVcpu: agg.cpu, devices: agg.gpu,
+            // Storage-engine memory scales with replicas per VM disk, and does
+            // not exist at all on external/LVM-backed storage.
+            replicas: repl, externalStorage: ext,
+          });
+
           // Demand normalised to PHYSICAL host units. GPU VMs 1:1; non-GPU divided by overcommit.
-          const demand = {
-            cpu: agg.gpuVcpu + agg.nonGpuVcpu / vcpuRatio,   // physical threads
-            ram: agg.gpuRam + agg.nonGpuRam / ramRatio,      // physical GB
+          const demandFor = (oh) => ({
+            cpu: agg.gpuVcpu + agg.nonGpuVcpu / vcpuRatio + oh.lumpCpu,   // physical threads
+            ram: agg.gpuRam + agg.nonGpuRam / ramRatio + oh.lumpRam,      // physical GB
             storage: ext ? 0 : agg.storage * repl,
             gpu: agg.gpu,
-          };
+          });
           // Largest single VM's physical footprint (the "must fit one host" rule).
           let maxVmThreads = 0, maxVmRam = 0;
           vms.forEach(m => {
@@ -785,21 +1379,38 @@
             maxVmRam = Math.max(maxVmRam, m.gpu > 0 ? m.ram : m.ram / ramRatio);
           });
 
-          // Per-host-type physical capacity (after hypervisor/OS reservation).
-          const capOf = (h) => {
+          /* Per-host-type physical capacity, after BOTH reservations:
+               - the manual per-host reserveThreads/reserveRam (unchanged), and
+               - the automatic per-node platform overhead.
+             These stack rather than duplicate: the manual fields stay available
+             as an ADDITIONAL reserve on top of the platform model. */
+          const capOf = (h, oh) => {
             const threads = Math.max(1, h.sockets * h.coresPerSocket * h.threadsPerCore);
+            /* Per-node overhead is recomputed against THIS host type's own size,
+               never rescaled from the primary. The terms scale differently —
+               Longhorn is a percentage of allocatable, the kubelet reserve has
+               its own non-linear formula, and the pod footprints are flat — so a
+               single scale factor would be wrong for a mixed inventory. */
+            const own = ohFor(oh.nodeCount, h);
+            const ohCpu = own.uniformCpu;
+            const ohRam = own.uniformRam;
             return { id: h.id, name: h.name, count: Math.max(0, h.count || 0),
                      cores: h.sockets * h.coresPerSocket, threads,
-                     cpu: Math.max(0, threads - (h.reserveThreads || 0)),
-                     ram: Math.max(0, h.ram - (h.reserveRam || 0)), rawRam: h.ram,
-                     storage: h.storage, gpu: h.gpus };
+                     cpu: Math.max(0, threads - (h.reserveThreads || 0) - ohCpu),
+                     ram: Math.max(0, h.ram - (h.reserveRam || 0) - ohRam), rawRam: h.ram,
+                     storage: Math.max(0, h.storage * (1 - own.uniformStoragePct)), rawStorage: h.storage,
+                     gpu: h.gpus, ohCpu, ohRam };
           };
-          const hostCaps = v.hosts.map(capOf);
-          const primaryHost = v.hosts.find(h => h.primary) || v.hosts[0];
-          const primary = hostCaps.find(h => h.id === primaryHost.id) || hostCaps[0];
 
-          let result;
+          let result, overhead, demand, hostCaps, primary;
           if (v.mode === 'pool') {
+            /* Pool mode needs no iteration: the host count is user-supplied, so
+               overhead resolves in a single pass. */
+            const poolHosts = v.hosts.reduce((s, h) => s + Math.max(0, h.count || 0), 0);
+            overhead = ohFor(poolHosts);
+            demand = demandFor(overhead);
+            hostCaps = v.hosts.map(h => capOf(h, overhead));
+            primary = hostCaps.find(h => h.id === primaryRaw.id) || hostCaps[0];
             // Heterogeneous inventory: aggregate capacity; reserve the FT largest hosts (worst case) per resource.
             const units = [];
             hostCaps.forEach(h => { for (let i = 0; i < h.count; i++) units.push(h); });
@@ -822,18 +1433,40 @@
             const feasible = totalHosts > ft && Object.values(checksPool).every(Boolean);
             result = { mode: 'pool', totalHosts, cap: { cpu, ram, storage, gpu, vms: vmsCap }, checksPool, feasible };
           } else {
-            // Auto: how many identical primary hosts are needed.
-            const H = primary;
-            const min = {
-              vms: ceil(agg.vms, maxVmsPerNode),
-              cpu: ceil(demand.cpu, H.cpu),
-              ram: ceil(demand.ram, H.ram),
-              storage: ext ? 0 : ceil(demand.storage, H.storage),
-              gpu: H.gpu > 0 ? ceil(demand.gpu, H.gpu) : 0,
-            };
+            /* Auto: how many identical primary hosts are needed. The infra-node
+               term depends on the node count, which depends on the overhead —
+               so solve by iterating to a fixed point. The only non-linearity is
+               min(infraCount, N), which stops moving once N >= infraCount, so
+               this converges in 2-3 passes; the cap is a guard, not a limit. */
+            let sized, guess = 1;
+            for (let iter = 0; iter < 10; iter++) {
+              const oh = ohFor(guess);
+              const d = demandFor(oh);
+              const caps = v.hosts.map(h => capOf(h, oh));
+              const H = caps.find(h => h.id === primaryRaw.id) || caps[0];
+              const min = {
+                vms: ceil(agg.vms, maxVmsPerNode),
+                cpu: ceil(d.cpu, H.cpu),
+                ram: ceil(d.ram, H.ram),
+                storage: ext ? 0 : ceil(d.storage, H.storage),
+                gpu: H.gpu > 0 ? ceil(d.gpu, H.gpu) : 0,
+              };
+              const minNodes = Math.max(1, min.vms, min.cpu, min.ram, min.storage, min.gpu);
+              const requiredNodes = minNodes + ft;
+              const decided = v.cluster.decidedNodes > 0 ? v.cluster.decidedNodes : requiredNodes;
+              sized = { oh, d, caps, H, min, minNodes, requiredNodes, decided };
+              if (decided === guess) break;           // fixed point
+              guess = decided;
+            }
+            overhead = sized.oh;
+            demand = sized.d;
+            hostCaps = sized.caps;
+            primary = sized.H;
+            const H = sized.H;
+            const min = sized.min;
             const gpuInfeasible = demand.gpu > 0 && H.gpu === 0;
-            const minNodes = Math.max(1, min.vms, min.cpu, min.ram, min.storage, min.gpu);
-            const requiredNodes = minNodes + ft;
+            const minNodes = sized.minNodes;
+            const requiredNodes = sized.requiredNodes;
             const decided = v.cluster.decidedNodes > 0 ? v.cluster.decidedNodes : requiredNodes;
             const failDenom = decided - ft;
             const perNode = (d) => d > 0 ? { vms: ceil(agg.vms, d), cpu: ceil(demand.cpu, d), ram: ceil(demand.ram, d), storage: ext ? 0 : ceil(demand.storage, d) } : null;
@@ -859,6 +1492,48 @@
           if (v.mode === 'pool') checks.push({ label: `Inventory still runs the full load after ${ft} host failure(s)`, ok: result.feasible });
           else checks.push({ label: `Cluster survives ${ft} simultaneous host failure(s) with a spare for upgrades`, ok: result.failDenom >= 1 && !!result.failure && result.failure.cpu <= result.H.cpu && result.failure.ram <= result.H.ram && (ext || result.failure.storage <= result.H.storage) });
 
+          /* Platform-overhead design rules. Only meaningful once a platform is
+             selected, so they stay silent on the 'none' model. */
+          if (overhead.lines.length > 0) {
+            const ohCpuShare = primary.threads ? (primary.ohCpu || 0) / primary.threads : 0;
+            const ohRamShare = primary.rawRam ? (primary.ohRam || 0) / primary.rawRam : 0;
+            checks.push({
+              label: `Per-node platform overhead stays under 35% of host capacity (CPU ${Math.round(ohCpuShare * 100)}%, RAM ${Math.round(ohRamShare * 100)}%)`,
+              ok: ohCpuShare <= 0.35 && ohRamShare <= 0.35,
+            });
+            // AHV cannot overcommit memory. We deliberately never mutate the
+            // user's overcommit ratios, so surface the conflict as a rule.
+            if (overhead.noRamOvercommit) checks.push({
+              label: `${overhead.label} cannot overcommit memory — RAM ratio must be 1:1 (currently ${ramRatio}:1)`,
+              ok: ramRatio <= 1,
+            });
+
+            /* Physical RAM must also hold what is consumed but never requested —
+               chiefly the storage engines. Compared physical-to-physical: VM
+               requests run ~3.6x VM resident memory, so mixing the two would
+               fail designs that are actually fine. */
+            const nodesNow = v.mode === 'pool' ? result.totalHosts : result.decided;
+            if (nodesNow > 0 && overhead.physPerVmRamMiB > 0) {
+              const vmsPerNode = agg.vms / nodesNow;
+              const physPerNode = overhead.physPerNodeRam
+                + overhead.physLumpRam / nodesNow
+                + vmsPerNode * overhead.physPerVmRamMiB / 1024;
+              checks.push({
+                label: `Physical RAM holds the platform + storage engines + running VMs (${physPerNode.toFixed(0)} GB of ${primary.rawRam} GB per host)`,
+                ok: physPerNode <= primary.rawRam,
+              });
+            }
+
+            /* Cluster singletons are not spread evenly: the apiserver, etcd and
+               ingress leaders land together. Measured skew is ~2x on the leader,
+               so uniform host sizing has to absorb it. Informational. */
+            if (overhead.clusterRam > 0) checks.push({
+              label: `One node carries the cluster services (~${overhead.clusterRam.toFixed(1)} GB / ${overhead.clusterCpu.toFixed(2)} thr more than its peers) — uniform hosts must have that headroom`,
+              ok: primary.ram >= overhead.clusterRam,
+              info: true,
+            });
+          }
+
           // Provisioned totals (× DR sites).
           let totals;
           if (v.mode === 'pool') {
@@ -870,12 +1545,42 @@
             const H = result.H, hc = v.hosts.find(x => x.id === H.id) || v.hosts[0];
             totals = { perSiteHosts: result.decided, totalHosts: result.decided * sites,
                        cores: result.decided * H.cores * sites, threads: result.decided * H.threads * sites,
-                       ram: result.decided * hc.ram * sites, storage: ext ? 0 : result.decided * hc.storage * sites, gpus: result.decided * hc.gpu * sites };
+                       // `hc` is a raw host, whose GPU field is `gpus` (not `gpu`).
+                       // Reading `hc.gpu` here produced NaN, which printed as
+                       // "NaN" in the PDF's Total GPUs row.
+                       ram: result.decided * hc.ram * sites, storage: ext ? 0 : result.decided * hc.storage * sites, gpus: result.decided * (hc.gpus || 0) * sites };
           }
           const externalStorageNeeded = ext ? agg.storage * sites : 0;
 
+          /* What-if: overhead at a few fixed cluster sizes, so the shape of the
+             curve is visible. The infra-node term is flat above `infraCount`
+             nodes while the per-node and per-VM terms scale — that is why 3
+             nodes / 50 VMs and 5 nodes / 100 VMs are not a simple ratio. */
+          const avgVm = agg.vms > 0
+            ? { ram: agg.ram / agg.vms, cpu: agg.cpu / agg.vms }
+            : { ram: 16, cpu: 4 };
+          const scenarioAt = (nodes, vmCount) => {
+            const oh = computePlatformOverhead(platformKey, ohCfg, {
+              nodeCount: nodes, hostThreads: primaryThreads, hostRam: primaryRaw.ram,
+              vmCount, vmRam: avgVm.ram * vmCount, vmVcpu: avgVm.cpu * vmCount,
+              devices: agg.vms > 0 ? Math.round(agg.gpu * vmCount / agg.vms) : 0,
+            });
+            return { nodes, vms: vmCount,
+                     cpu: oh.uniformCpu * nodes + oh.lumpCpu,
+                     ram: oh.uniformRam * nodes + oh.lumpRam,
+                     storage: oh.uniformStoragePct * primaryRaw.storage * nodes };
+          };
+          /* Only offer the what-if table when there is actually overhead to show.
+             Selecting a platform but switching "apply automatically" off used to
+             render four all-zero rows. */
+          const overheadScenarios = overhead.lines.length === 0 ? [] : [
+            scenarioAt(3, 50), scenarioAt(5, 100), scenarioAt(7, 200),
+            { ...scenarioAt(v.mode === 'pool' ? result.totalHosts : result.decided, agg.vms), current: true },
+          ];
+
           return { ...result, agg, demand, ext, repl, ft, sites, vcpuRatio, ramRatio,
-                   maxVmThreads, maxVmRam, checks, totals, externalStorageNeeded, hostCaps, primary };
+                   maxVmThreads, maxVmRam, checks, totals, externalStorageNeeded, hostCaps, primary,
+                   overhead, overheadScenarios, platform: platformKey };
         }, [state]);
 
         const activeNetworkRules = useMemo(() => {
@@ -986,6 +1691,8 @@
                 {activeTab === 'virt' && (
                   <VirtualizationTab virt={state.virtualization} vs={virtSummary}
                     setVirtSection={setVirtSection} setVirtMode={setVirtMode}
+                    setVirtPlatform={setVirtPlatform} setOverheadFlag={setOverheadFlag}
+                    setOverheadAddon={setOverheadAddon} setOverheadOverride={setOverheadOverride}
                     addHost={addHost} updateHost={updateHost} removeHost={removeHost} setPrimaryHost={setPrimaryHost}
                     addVirtVm={addVirtVm} updateVirtVm={updateVirtVm} removeVirtVm={removeVirtVm} />
                 )}
@@ -1720,7 +2427,7 @@
                 <div className={`rounded-xl p-5 ${forPdf ? 'border-2 border-dashed border-gray-300' : 'border-2 border-dashed border-suse-border bg-suse-bg/40'}`}>
                   <div className="flex items-center justify-center gap-2 mb-1">
                     <Boxes size={16} className="text-suse-green" />
-                    <h3 className={`text-sm font-bold uppercase tracking-wider text-center ${textSub}`}>Physical Virtualization Layer — SUSE Virtualization (Harvester)</h3>
+                    <h3 className={`text-sm font-bold uppercase tracking-wider text-center ${textSub}`}>Physical Virtualization Layer{vs.overhead && vs.platform !== 'none' ? ` — ${vs.overhead.label}` : ''}</h3>
                   </div>
                   <p className={`text-xs text-center mb-4 ${textSub}`}>
                     {vs.mode === 'pool' ? 'Mixed host inventory' : 'Auto-sized identical hosts'} · {vs.totals.totalHosts} physical host{vs.totals.totalHosts !== 1 ? 's' : ''} total
@@ -1928,6 +2635,33 @@
           onChange={(e) => onChange(e.target.value)}
           className={`bg-suse-bg border border-suse-border rounded text-sm text-gray-100 px-2.5 py-1.5 focus:outline-none focus:border-suse-green ${className}`} />
       );
+      /* Provenance marker. Every overhead coefficient sits in one of three tiers:
+           verified — traced to vendor source code, or a published worked example
+                      this model reproduces numerically;
+           measured — taken from an independent benchmark of a real cluster;
+           estimate — vendor blog, community figure, or reasoned inference.
+         A customer-facing number must say which it is, so this renders
+         everywhere the numbers do — the UI and the PDF alike. */
+      const TIERS = {
+        verified: { label: 'verified', cls: 'border-suse-green/40 text-suse-green bg-suse-green/10' },
+        measured: { label: 'measured', cls: 'border-sky-500/40 text-sky-400 bg-sky-500/10' },
+        estimate: { label: 'estimate', cls: 'border-amber-500/40 text-amber-400 bg-amber-500/10' },
+      };
+      const TierBadge = ({ tier, src }) => {
+        const t = TIERS[tier] || TIERS.estimate;
+        const isUrl = typeof src === 'string' && /^https?:\/\//.test(src);
+        const href = isUrl ? src.split(';')[0].trim() : null;
+        const badge = (
+          <span title={src || ''}
+            className={`inline-block text-[9px] font-mono uppercase px-1 py-px rounded border align-middle ${t.cls}`}>
+            {t.label}
+          </span>
+        );
+        return href
+          ? <a href={href} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">{badge}</a>
+          : badge;
+      };
+
       const VResultRow = ({ label, value, sub, tone }) => (
         <div className="flex items-center justify-between py-1.5 border-b border-suse-border/50 last:border-0">
           <span className="text-sm text-gray-400">{label}</span>
@@ -1968,8 +2702,8 @@
             {cap && (
               <div className="flex flex-wrap gap-1.5 mt-3">
                 <Pill icon={Cpu} tone="green">{cap.cores} cores · {cap.threads} threads</Pill>
-                <Pill icon={Cpu} tone="gray">{cap.cpu} schedulable</Pill>
-                <Pill icon={MemoryStick} tone="gray">{cap.ram} GB usable</Pill>
+                <Pill icon={Cpu} tone="gray">{Math.round(cap.cpu * 10) / 10} schedulable</Pill>
+                <Pill icon={MemoryStick} tone="gray">{Math.round(cap.ram * 10) / 10} GB usable</Pill>
                 {cap.gpu > 0 && <Pill icon={Layers} tone="gray">{cap.gpu} GPU</Pill>}
               </div>
             )}
@@ -1977,7 +2711,182 @@
         );
       }
 
-      function VirtualizationTab({ virt, vs, setVirtSection, setVirtMode, addHost, updateHost, removeHost, setPrimaryHost, addVirtVm, updateVirtVm, removeVirtVm }) {
+      /* Hypervisor platform + overhead controls. Selecting a platform applies the
+         overhead model only — it never rewrites the overcommit ratios. */
+      function PlatformPanel({ virt, vs, setVirtPlatform, setOverheadFlag, setOverheadAddon, setOverheadOverride }) {
+        const [open, setOpen] = React.useState(false);
+        const key = hypervisorKey(virt.platform);
+        const P = HYPERVISORS[key];
+        const ovh = virt.overhead || {};
+        const addons = ovh.addons || {};
+        const overrides = ovh.overrides || {};
+        const isNone = key === 'none';
+        const devices = vs.agg.gpu;
+
+        return (
+          <div>
+            <SectionLabel icon={Layers}>Virtualization Platform</SectionLabel>
+            <Panel className="p-5 space-y-4">
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Hypervisor platform</label>
+                  <select value={key} onChange={(e) => setVirtPlatform(e.target.value)}
+                    className="w-full bg-suse-bg border border-suse-border rounded text-sm text-gray-100 px-2.5 py-1.5 focus:outline-none focus:border-suse-green">
+                    {HYPERVISOR_ORDER.map(k => <option key={k} value={k}>{HYPERVISORS[k].label}</option>)}
+                  </select>
+                </div>
+                <div className="flex items-end">
+                  <div className="w-full">
+                    <VToggle label="Apply platform overhead automatically"
+                      checked={ovh.auto !== false && !isNone}
+                      onChange={(on) => setOverheadFlag('auto', on)} />
+                  </div>
+                </div>
+              </div>
+              <p className="text-xs text-gray-500">{P.note}</p>
+
+              {/* How complete this platform's model is — distinct from how well
+                  any individual coefficient is sourced. Without this, a reader
+                  comparing platforms mistakes modelling depth for efficiency. */}
+              {!isNone && DEPTH[P.depth] && (
+                <div className={`text-xs rounded-md p-3 border leading-relaxed ${DEPTH[P.depth].cls}`}>
+                  <span className="font-mono uppercase text-[10px] tracking-wide">Model: {DEPTH[P.depth].label}</span>
+                  <p className="mt-1 text-gray-400">{P.depthNote || DEPTH[P.depth].blurb}</p>
+                  {P.depthGaps && P.depthGaps.length > 0 && (
+                    <p className="mt-1 text-gray-500">
+                      <strong className="text-gray-400">Not modelled:</strong> {P.depthGaps.join('; ')}.
+                      Overhead shown for this platform is therefore a <strong className="text-gray-400">lower bound</strong>,
+                      and is not directly comparable with SUSE Virtualization (Harvester), whose model is calibrated
+                      against measurement.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {!isNone && (
+                <div className="text-xs text-gray-500 bg-suse-bg border border-suse-border rounded-md p-3 leading-relaxed">
+                  Overhead is applied as {P.kubeletCpu === 'harvester' ? 'a per-node kubelet reserve, ' : ''}
+                  per-node platform pods,
+                  {/* Only claim a control-plane term when this platform has one:
+                      vSphere, AHV and Proxmox model neither scope. */}
+                  {vs.overhead.clusterRam > 0
+                    ? <> cluster services counted <strong className="text-gray-400">once</strong> (they do not
+                        replicate per node),</>
+                    : vs.overhead.infraCount > 0
+                      ? <> a control-plane extra on the first {vs.overhead.infraCount} node(s),</>
+                      : null}
+                  {' '}per-VM hypervisor overhead, per-device passthrough and a storage reserve. Figures are
+                  scheduler <strong className="text-gray-400">requests</strong> — what blocks VM placement
+                  {P.kubeletCpu === 'harvester' ? ' — plus the kubelet reserve. ' : '. '}
+                  Your <strong className="text-gray-400">overcommit ratios are never
+                  changed</strong> by this selection; where a platform conflicts with them (Nutanix AHV cannot
+                  overcommit memory) it is reported as a design-rule check instead. Per-host
+                  <em> Reserve RAM / Reserve threads</em> remain available as an <em>additional</em> manual reserve.
+                </div>
+              )}
+
+              {!isNone && Object.keys(P.addons).length > 0 && (
+                <div>
+                  <p className="text-xs text-gray-400 mb-2 uppercase tracking-wide">Add-ons</p>
+                  <div className="grid sm:grid-cols-2 gap-2">
+                    {Object.entries(P.addons).map(([k, a]) => {
+                      const dflt = a.on === 'auto' ? devices > 0 : !!a.on;
+                      const on = addons[k] === undefined ? dflt : !!addons[k];
+                      return (
+                        <div key={k}>
+                          <VToggle label={a.label} checked={on} onChange={(val) => setOverheadAddon(k, val)} />
+                          <div className="mt-1 pl-1"><TierBadge tier={a.tier} src={a.src} />
+                            {a.on === 'auto' && <span className="text-[10px] text-gray-600 ml-2">auto-enabled when GPUs are present</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {!isNone && (
+                <div>
+                  <button onClick={() => setOpen(!open)} className="text-xs text-suse-green hover:text-emerald-300">
+                    {open ? '▾' : '▸'} {open ? 'Hide' : 'Show'} overhead factors ({vs.overhead.lines.length} line items)
+                  </button>
+                  {open && (
+                    <div className="mt-3 space-y-3">
+                      <p className="text-[11px] text-gray-500">
+                        Every coefficient below is editable. Blank a field to fall back to the sourced default.
+                        <span className="text-suse-green"> Verified</span> = traced to vendor source code or a published
+                        worked example this model reproduces; <span className="text-amber-400">estimate</span> = vendor
+                        blog or community measurement. Full derivations in{' '}
+                        <a href={`${GITHUB_URL}/blob/main/METHODOLOGY.md`} target="_blank" rel="noopener noreferrer"
+                           className="text-suse-green underline">METHODOLOGY.md</a>.
+                      </p>
+                      {P.kubeletCpu === 'harvester' && (
+                        <div className="text-[11px] text-gray-500 bg-suse-bg border border-suse-border rounded p-2 font-mono">
+                          Kubelet reserve = 2 × (GKE tiers + 400m for maxPods&gt;110) — not editable, it is a
+                          published formula. 16 cores → 408m + 612m = 1020m. <TierBadge tier="verified" src={OVERHEAD_SRC.hvCpuPin} />
+                        </div>
+                      )}
+                      <div className="grid sm:grid-cols-2 gap-3">
+                        {(P.perNode || []).filter(i => i.cpu != null || i.ram != null).map(i => (
+                          <div key={i.key} className="border border-suse-border rounded p-2">
+                            <p className="text-[11px] text-gray-300 mb-1">{i.label} <TierBadge tier={i.tier} src={i.src} /></p>
+                            <div className="grid grid-cols-2 gap-2">
+                              <OverrideField label="threads/node" k={`${i.key}.cpu`} dflt={i.cpu} overrides={overrides} onSet={setOverheadOverride} />
+                              <OverrideField label="GB/node" k={`${i.key}.ram`} dflt={i.ram} overrides={overrides} onSet={setOverheadOverride} />
+                            </div>
+                          </div>
+                        ))}
+                        {(P.infraNode || []).map(i => (
+                          <div key={i.key} className="border border-suse-border rounded p-2">
+                            <p className="text-[11px] text-gray-300 mb-1">Control plane: {i.label} <TierBadge tier={i.tier} src={i.src} /></p>
+                            <div className="grid grid-cols-2 gap-2">
+                              <OverrideField label="threads/node" k={`infra.${i.key}.cpu`} dflt={i.cpu} overrides={overrides} onSet={setOverheadOverride} />
+                              <OverrideField label="GB/node" k={`infra.${i.key}.ram`} dflt={i.ram} overrides={overrides} onSet={setOverheadOverride} />
+                            </div>
+                          </div>
+                        ))}
+                        {P.perVm && (
+                          <div className="border border-suse-border rounded p-2">
+                            <p className="text-[11px] text-gray-300 mb-1">Per-VM overhead <TierBadge tier={P.perVm.tier} src={P.perVm.src} /></p>
+                            <div className="grid grid-cols-3 gap-2">
+                              <OverrideField label="× RAM" k="perVm.ramFactor" dflt={P.perVm.ramFactor} step={0.001} overrides={overrides} onSet={setOverheadOverride} />
+                              <OverrideField label="MiB fixed" k="perVm.ramFixedMiB" dflt={P.perVm.ramFixedMiB} overrides={overrides} onSet={setOverheadOverride} />
+                              <OverrideField label="MiB/vCPU" k="perVm.ramPerVcpuMiB" dflt={P.perVm.ramPerVcpuMiB} overrides={overrides} onSet={setOverheadOverride} />
+                            </div>
+                          </div>
+                        )}
+                        <div className="border border-suse-border rounded p-2">
+                          <p className="text-[11px] text-gray-300 mb-1">Storage reserve <TierBadge tier={P.storageTier} src={P.storageSrc} /></p>
+                          <OverrideField label={`% of raw disk (max ${P.storagePctMax})`} k="storage.pct" dflt={P.storagePct} overrides={overrides} onSet={setOverheadOverride} />
+                        </div>
+                        {P.perDevice && (
+                          <div className="border border-suse-border rounded p-2">
+                            <p className="text-[11px] text-gray-300 mb-1">Per passthrough device <TierBadge tier={P.perDevice.tier} src={P.perDevice.src} /></p>
+                            <OverrideField label="GiB/device" k="perDevice.ramGiB" dflt={P.perDevice.ramGiB} overrides={overrides} onSet={setOverheadOverride} />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </Panel>
+          </div>
+        );
+      }
+
+      const OverrideField = ({ label, k, dflt, step = 0.1, overrides, onSet }) => (
+        <div>
+          <label className="block text-[10px] text-gray-500 mb-0.5">{label}</label>
+          <input type="number" step={step} min={0}
+            value={overrides[k] !== undefined ? overrides[k] : ''}
+            placeholder={dflt != null ? String(dflt) : '0'}
+            onChange={(e) => onSet(k, e.target.value === '' ? null : e.target.value)}
+            className="w-full bg-suse-bg border border-suse-border rounded text-center text-xs text-gray-100 py-1 focus:outline-none focus:border-suse-green font-mono" />
+        </div>
+      );
+
+      function VirtualizationTab({ virt, vs, setVirtSection, setVirtMode, setVirtPlatform, setOverheadFlag, setOverheadAddon, setOverheadOverride, addHost, updateHost, removeHost, setPrimaryHost, addVirtVm, updateVirtVm, removeVirtVm }) {
         const oc = virt.overcommit, cl = virt.cluster, st = virt.storage, dr = virt.dr;
         const capById = (id) => vs.hostCaps.find(c => c.id === id);
         const capRow = (label, dem, c, unit = '') => (
@@ -1991,8 +2900,8 @@
             {/* ---------------- Inputs ---------------- */}
             <div className="lg:col-span-2 space-y-6">
               <Panel className="p-5">
-                <h2 className="text-lg font-bold text-white mb-1">SUSE Virtualization (bare-metal) planning</h2>
-                <p className="text-sm text-gray-400 mb-4">Size the physical SUSE Virtualization (Harvester) hosts that will run your SUSE AI cluster. Every Kubernetes node from the <strong className="text-gray-300">Cluster Sizing</strong> tab is treated as a VM; add any extra VMs below. GPU-bound VMs are pinned 1:1 (never overcommitted). See <a href={`${GITHUB_URL}/blob/main/METHODOLOGY.md`} target="_blank" rel="noopener noreferrer" className="text-suse-green underline">METHODOLOGY.md</a> for the formulas and references.</p>
+                <h2 className="text-lg font-bold text-white mb-1">Bare-metal virtualization planning</h2>
+                <p className="text-sm text-gray-400 mb-4">Size the physical hosts that will run your SUSE AI cluster. Every Kubernetes node from the <strong className="text-gray-300">Cluster Sizing</strong> tab is treated as a VM; add any extra VMs below. GPU-bound VMs are pinned 1:1 (never overcommitted). Pick your hypervisor below and its management-plane overhead is applied automatically — every coefficient is sourced and editable. See <a href={`${GITHUB_URL}/blob/main/METHODOLOGY.md`} target="_blank" rel="noopener noreferrer" className="text-suse-green underline">METHODOLOGY.md</a> for the formulas and references.</p>
                 <div className="inline-flex bg-suse-bg border border-suse-border rounded-lg p-1">
                   {[['auto', 'Size identical hosts'], ['pool', 'Check mixed inventory']].map(([m, label]) => (
                     <button key={m} onClick={() => setVirtMode(m)}
@@ -2003,6 +2912,29 @@
                   ? <>Auto mode computes how many identical hosts (the one marked <strong className="text-gray-400">building block</strong>) are needed.</>
                   : <>Pool mode checks whether your mixed inventory (each type × quantity) has enough capacity for the workload after reserving the largest hosts for failure.</>}</p>
               </Panel>
+
+              {/* Existing configurations load with no platform selected so their
+                  numbers never change silently. Offer the upgrade explicitly. */}
+              {virt.platform === 'none' && !virt.overhead.dismissed && (
+                <Panel className="p-4 border-suse-green/40">
+                  <p className="text-sm text-gray-300 mb-1"><strong className="text-suse-green">Platform overhead is not being counted.</strong></p>
+                  <p className="text-xs text-gray-400 mb-3">
+                    This configuration was saved before the hypervisor overhead model existed, so it is using the
+                    original raw-capacity maths — the management plane (RKE2, KubeVirt, Longhorn, monitoring) and
+                    per-VM hypervisor overhead are invisible. Selecting a platform will make the sizing more
+                    realistic and will <strong className="text-gray-300">increase the recommended host count</strong>.
+                  </p>
+                  <div className="flex gap-2">
+                    <button onClick={() => setVirtPlatform('harvester')}
+                      className="text-xs px-3 py-1.5 rounded bg-suse-green text-white hover:bg-emerald-600">Use SUSE Virtualization (Harvester)</button>
+                    <button onClick={() => setOverheadFlag('dismissed', true)}
+                      className="text-xs px-3 py-1.5 rounded border border-suse-border text-gray-400 hover:text-gray-200">Keep raw capacity</button>
+                  </div>
+                </Panel>
+              )}
+
+              <PlatformPanel virt={virt} vs={vs} setVirtPlatform={setVirtPlatform} setOverheadFlag={setOverheadFlag}
+                setOverheadAddon={setOverheadAddon} setOverheadOverride={setOverheadOverride} />
 
               {/* Host types */}
               <div>
@@ -2158,6 +3090,112 @@
                   {vs.agg.gpuVms > 0 && <div className="mt-2 text-[11px] text-gray-500">{vs.agg.gpuVms} GPU VM(s) pinned at 1:1 (no overcommit); overcommit applies to the other {vs.agg.vms - vs.agg.gpuVms} VM(s).</div>}
                 </Panel>
 
+                {/* Platform overhead: itemised, sourced, and shown at a few
+                    cluster sizes so the non-linearity is visible. */}
+                {vs.overhead.lines.length > 0 && (
+                  <Panel className="p-5">
+                    <SectionLabel icon={Layers}>Platform Overhead</SectionLabel>
+                    <p className="text-[11px] text-gray-500 mb-2">
+                      {vs.overhead.label}
+                      {DEPTH[vs.overhead.depth] && <> · <span className={DEPTH[vs.overhead.depth].cls.split(' ').find(c => c.startsWith('text-'))}>
+                        {DEPTH[vs.overhead.depth].label}</span></>}
+                    </p>
+                    {vs.overhead.depthGaps && vs.overhead.depthGaps.length > 0 && (
+                      <p className="text-[10px] text-amber-400/80 mb-2 leading-relaxed">
+                        Lower bound — {vs.overhead.depthGaps.join(', ')} not modelled for this platform.
+                      </p>
+                    )}
+                    {['per-node', 'cluster', 'infra-node', 'per-vm', 'per-device'].map(scope => {
+                      const rows = vs.overhead.lines.filter(l => l.scope === scope);
+                      if (!rows.length) return null;
+                      const heading = { 'per-node': 'Every node',
+                                        'cluster': 'Once per cluster (does not scale with nodes)',
+                                        'infra-node': `Control-plane nodes (first ${vs.overhead.infraCount})`,
+                                        'per-vm': 'Per VM', 'per-device': 'Per passthrough device' }[scope];
+                      return (
+                        <div key={scope} className="mb-2">
+                          <p className="text-[10px] uppercase tracking-wider text-gray-600 mt-2 mb-1">{heading}</p>
+                          {rows.map(l => (
+                            <div key={l.key} className="flex items-start justify-between py-1 border-b border-suse-border/50 last:border-0 gap-2">
+                              <span className="text-[11px] text-gray-400 flex-1">
+                                {l.label} <TierBadge tier={l.tier} src={l.src} />
+                              </span>
+                              <span className={`text-right font-mono text-[11px] whitespace-nowrap ${l.basis === 'physical' ? 'text-gray-400 italic' : 'text-white'}`}>
+                                {l.cpu > 0 && <>{l.cpu.toFixed(2)} thr</>}
+                                {l.cpu > 0 && l.ram > 0 && ' · '}
+                                {l.ram > 0 && <>{l.ram.toFixed(1)} GB</>}
+                                {l.storagePct > 0 && <>{(l.storagePct * 100).toFixed(0)}% disk</>}
+                                {!l.cpu && !l.ram && !l.storagePct && '—'}
+                                {l.basis === 'physical' && <span className="block text-[9px] text-gray-600 not-italic">physical RAM only</span>}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                    <div className="mt-3 pt-2 border-t border-suse-border">
+                      <VResultRow label="Per node (every host)"
+                        value={`${vs.overhead.uniformCpu.toFixed(2)} thr · ${vs.overhead.uniformRam.toFixed(1)} GB`} />
+                      <VResultRow label="Fleet-wide (cluster services + VMs + devices)"
+                        value={`${vs.overhead.lumpCpu.toFixed(2)} thr · ${vs.overhead.lumpRam.toFixed(1)} GB`} />
+                      <VResultRow label="Usable per host after overhead"
+                        value={`${vs.primary.cpu.toFixed(1)} / ${vs.primary.threads} thr`}
+                        sub={`${vs.primary.ram.toFixed(0)} / ${vs.primary.rawRam} GB RAM`} tone="good" />
+                      {(vs.overhead.physLumpRam > 0 || vs.overhead.physPerNodeRam > 0) && (
+                        <VResultRow label="Physical RAM, not schedulable capacity"
+                          value={`+${(vs.overhead.physLumpRam + vs.overhead.physPerNodeRam * (vs.mode === 'pool' ? vs.totalHosts : vs.decided)).toFixed(1)} GB`}
+                          sub="storage engines — consumed, not requested" />
+                      )}
+                    </div>
+                    <p className="mt-2 text-[10px] text-gray-600 leading-relaxed">
+                      {/* Only Harvester has a kubelet layer; don't attribute one
+                          to platforms that have none. */}
+                      Figures are scheduler <strong>requests</strong>
+                      {vs.overhead.lines.some(l => l.basis === 'reserve') && <> plus the kubelet reserve</>} — what
+                      actually blocks a VM from being placed.
+                      {vs.overhead.lines.some(l => l.basis === 'physical') && <> Lines marked <em>physical RAM only</em> are
+                      consumed but not requested: they never reduce schedulable capacity, but the hosts must still
+                      have the RAM.</>}
+                    </p>
+                  </Panel>
+                )}
+
+                {vs.overheadScenarios.length > 0 && (
+                  <Panel className="p-5">
+                    <SectionLabel icon={Boxes}>Overhead by Cluster Size</SectionLabel>
+                    <p className="text-[11px] text-gray-500 mb-2">
+                      {vs.overhead.clusterRam > 0
+                        ? <>Cluster services (Rancher, CDI, the KubeVirt and Harvester operators, the
+                            apiserver/etcd leaders) are counted <strong>once</strong>, not per node — so overhead
+                            does not grow in proportion to the cluster.</>
+                        : <>Control-plane overhead is fixed to the first {vs.overhead.infraCount} node(s), so it
+                            does not scale — which is why overhead does not grow in proportion to the cluster.</>}
+                    </p>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[11px] font-mono">
+                        <thead>
+                          <tr className="text-gray-500 text-left border-b border-suse-border">
+                            <th className="py-1 pr-2 font-normal">Cluster</th>
+                            <th className="py-1 px-2 font-normal text-right">CPU</th>
+                            <th className="py-1 px-2 font-normal text-right">RAM</th>
+                            <th className="py-1 pl-2 font-normal text-right">Disk</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {vs.overheadScenarios.map((r, i) => (
+                            <tr key={i} className={`border-b border-suse-border/40 last:border-0 ${r.current ? 'text-suse-green' : 'text-gray-300'}`}>
+                              <td className="py-1 pr-2">{r.nodes}n / {r.vms} VM{r.current ? ' ←' : ''}</td>
+                              <td className="py-1 px-2 text-right">{r.cpu.toFixed(1)} thr</td>
+                              <td className="py-1 px-2 text-right">{r.ram.toFixed(0)} GB</td>
+                              <td className="py-1 pl-2 text-right">{r.storage > 0 ? `${Math.round(r.storage).toLocaleString('en-US')} GB` : '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </Panel>
+                )}
+
                 {vs.mode === 'auto' ? (
                   <>
                     {/* Binding resource */}
@@ -2180,7 +3218,7 @@
                       {vs.normal && (
                         <div className="mb-3">
                           <div className="text-xs text-gray-400 mb-1">Normal ({vs.decided} hosts)</div>
-                          <VResultRow label="vCPU / host" value={`${vs.normal.cpu} / ${vs.H.cpu}`} sub={vs.util && `${vs.util.cpu}% (physical threads)`} />
+                          <VResultRow label="vCPU / host" value={`${vs.normal.cpu} / ${vs.H.cpu.toFixed(1)}`} sub={vs.util && `${vs.util.cpu}% (physical threads)`} />
                           <VResultRow label="RAM / host" value={`${vs.normal.ram} / ${vs.H.ram} GB`} sub={vs.util && `${vs.util.ram}%`} />
                           {!vs.ext && <VResultRow label="Storage / host" value={`${vs.normal.storage.toLocaleString('en-US')} / ${vs.H.storage.toLocaleString('en-US')} GB`} sub={vs.util && `${vs.util.storage}%`} />}
                         </div>
@@ -2189,7 +3227,7 @@
                         <div className="text-xs text-gray-400 mb-1">Degraded ({vs.failDenom} hosts after {vs.ft} failure{vs.ft !== 1 ? 's' : ''})</div>
                         {vs.failure ? (
                           <>
-                            <VResultRow label="vCPU / host" value={`${vs.failure.cpu} / ${vs.H.cpu}`} tone={vs.failure.cpu > vs.H.cpu ? 'bad' : 'good'} />
+                            <VResultRow label="vCPU / host" value={`${vs.failure.cpu} / ${vs.H.cpu.toFixed(1)}`} tone={vs.failure.cpu > vs.H.cpu ? 'bad' : 'good'} />
                             <VResultRow label="RAM / host" value={`${vs.failure.ram} / ${vs.H.ram} GB`} tone={vs.failure.ram > vs.H.ram ? 'bad' : 'good'} />
                             {!vs.ext && <VResultRow label="Storage / host" value={`${vs.failure.storage.toLocaleString('en-US')} / ${vs.H.storage.toLocaleString('en-US')} GB`} tone={vs.failure.storage > vs.H.storage ? 'bad' : 'good'} />}
                           </>
@@ -2509,7 +3547,20 @@
           const ext = virt.ext;
           let vy = sectionTitle('SUSE Virtualization (Bare-Metal) Sizing', CONTENT_TOP);
           doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(MUTE);
-          const intro = doc.splitTextToSize(`Mode: ${virt.mode === 'pool' ? 'Mixed inventory check' : 'Auto-size identical hosts'}  ·  Overcommit (non-GPU): ${virtCfg.overcommit.vcpu}× vCPU / ${virtCfg.overcommit.ram}× RAM  ·  GPU VMs pinned 1:1`, pageW() - margin * 2);
+          const oh = virt.overhead || { lines: [] };
+          const pdfHv = HYPERVISORS[hypervisorKey(virt.platform)];
+          const addonNames = pdfHv.addons
+            ? Object.entries(pdfHv.addons)
+                .filter(([k, a]) => {
+                  const dflt = a.on === 'auto' ? virt.agg.gpu > 0 : !!a.on;
+                  const set = (virtCfg.overhead && virtCfg.overhead.addons) || {};
+                  return set[k] === undefined ? dflt : !!set[k];
+                }).map(([, a]) => a.label)
+            : [];
+          const intro = doc.splitTextToSize(
+            `Platform: ${oh.label || 'None — no platform overhead'}  ·  Mode: ${virt.mode === 'pool' ? 'Mixed inventory check' : 'Auto-size identical hosts'}`
+            + `  ·  Overcommit (non-GPU): ${virtCfg.overcommit.vcpu}× vCPU / ${virtCfg.overcommit.ram}× RAM  ·  GPU VMs pinned 1:1`
+            + (addonNames.length ? `\nAdd-ons counted: ${addonNames.join(', ')}` : ''), pageW() - margin * 2);
           doc.text(intro, margin, vy); vy += intro.length * 4 + 3;
 
           vy = table({ startY: vy,
@@ -2518,7 +3569,7 @@
               h.name + (h.primary && virt.mode === 'auto' ? ' (block)' : ''),
               virt.mode === 'pool' ? String(h.count) : '—',
               `${h.sockets}×${h.coresPerSocket}×${h.threadsPerCore} = ${c.threads}`,
-              String(c.cpu), `${fmt(c.ram || 0)} GB`,
+              (c.cpu || 0).toFixed(1), `${fmt(Math.round(c.ram || 0))} GB`,
               ext ? '—' : `${fmt(h.storage || 0)} GB`, String(h.gpus),
             ]; }) }) + 6;
 
@@ -2531,6 +3582,95 @@
               ['Total storage', ext ? `${fmt(virt.externalStorageNeeded)} GB usable (external)` : `${fmt(virt.agg.storage)} GB × ${virt.repl} = ${fmt(virt.agg.storage*virt.repl)} GB`],
               ['Total GPUs', String(virt.agg.gpu)],
             ] }) + 6;
+
+          /* Platform overhead, itemised with provenance. This report is what
+             leaves the building, so it must let the reader tell a formula-derived
+             number from an observed one — same Verified/Estimate tiering as the UI. */
+          if (oh.lines && oh.lines.length) {
+            const scopeLabel = { 'per-node': 'every node', 'cluster': 'once per cluster',
+                                 'infra-node': `first ${oh.infraCount} node(s)`,
+                                 'per-vm': 'per VM', 'per-device': 'per device' };
+            const tierLabel = { verified: 'Verified', measured: 'Measured', estimate: 'Estimate' };
+            /* Cite sources by number and list them once underneath. Printing the
+               URLs inline repeats the same benchmark link on a dozen rows and
+               makes the table unreadable. */
+            const srcList = [];
+            const citeNums = (src) => (src || '').split(';')
+              .map(x => x.trim()).filter(Boolean)
+              .map(x => { let i = srcList.indexOf(x); if (i < 0) { srcList.push(x); i = srcList.length - 1; } return i + 1; });
+            const cite = (src) => citeNums(src).join(', ');
+            vy = table({ startY: vy, styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.4 },
+              // Leave the last column auto-sized; over-specifying every width
+              // overflows the page and autoTable drops content.
+              columnStyles: { 0: { cellWidth: 58 }, 1: { cellWidth: 20 }, 2: { cellWidth: 40 },
+                              3: { cellWidth: 16 }, 4: { halign: 'center' } },
+              head: [['Platform overhead', 'Scope', 'CPU / RAM', 'Basis', 'Src']],
+              body: oh.lines.map(l => [
+                l.label + (l.basis === 'physical' ? '  [physical RAM only]' : ''),
+                scopeLabel[l.scope] || l.scope,
+                l.storagePct > 0 ? `${(l.storagePct * 100).toFixed(0)}% disk`
+                  : `${l.cpu > 0 ? l.cpu.toFixed(2) + ' thr' : '—'} / ${l.ram > 0 ? l.ram.toFixed(1) + ' GB' : '—'}`,
+                tierLabel[l.tier] || 'Estimate',
+                cite(l.src),
+              ]).concat([[
+                'TOTAL (schedulable capacity removed)', 'per node + fleet',
+                `${oh.uniformCpu.toFixed(2)} thr/node + ${oh.lumpCpu.toFixed(2)} thr fleet / `
+                  + `${oh.uniformRam.toFixed(1)} GB/node + ${oh.lumpRam.toFixed(1)} GB fleet`,
+                '', '',
+              ]]).concat((oh.physLumpRam > 0 || oh.physPerNodeRam > 0) ? [[
+                'PHYSICAL RAM (not schedulable capacity)', 'storage engines',
+                `${(oh.physLumpRam + oh.physPerNodeRam * (virt.mode === 'pool' ? virt.totalHosts : virt.decided)).toFixed(1)} GB consumed, not requested`,
+                '', '',
+              ]] : []) }) + 3;
+
+            // The numbered source list the "Src" column refers to.
+            if (srcList.length) {
+              doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(MUTE);
+              const srcLines = srcList.map((src, i) => doc.splitTextToSize(`[${i + 1}]  ${src}`, pageW() - margin * 2 - 2));
+              const srcH = srcLines.reduce((t, l) => t + l.length * 3, 0) + 7;
+              if (vy + srcH > pageH() - CONTENT_BOTTOM) { doc.addPage('a4', 'p'); vy = CONTENT_TOP; }
+              doc.text('Sources', margin, vy); vy += 4;
+              doc.setFont('helvetica', 'normal'); doc.setFontSize(6.5);
+              srcLines.forEach(l => { doc.text(l, margin + 2, vy); vy += l.length * 3; });
+              vy += 3;
+            }
+
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(MUTE);
+            const prov = doc.splitTextToSize(
+              (oh.depthGaps && oh.depthGaps.length
+                ? `Model completeness — this platform's overhead model does not yet cover: ${oh.depthGaps.join('; ')}. `
+                  + 'The totals above are therefore a LOWER BOUND on real overhead, and should not be compared '
+                  + 'against SUSE Virtualization (Harvester), whose model is calibrated against measurements from '
+                  + 'a real cluster. '
+                : 'Model completeness — every line above is calibrated against measurements from a real cluster. ')
+              + 'Src — the numbers in the table\'s last column index the Sources list above. '
+              + 'Basis — figures are scheduler REQUESTS (what blocks a VM from being placed) plus the kubelet '
+              + 'reserve. Rows marked "physical RAM only" are consumed but not requested: they do not reduce '
+              + 'schedulable capacity, but the hosts must still have that RAM. '
+              + 'Provenance — "Verified": traced to vendor source code, or a published worked example this model '
+              + 'reproduces numerically. "Measured": taken from an independent benchmark of a real cluster '
+              + '(Harvester v1.7.1, one hardware configuration, no monitoring or logging add-ons). "Estimate": '
+              + 'vendor documentation, blog or community figure; treat as indicative and adjust to your own '
+              + 'measurements. Harvester configures no kubelet memory reservation (it sets '
+              + 'system-reserved/kube-reserved for CPU only), so no RAM figure here is vendor-specified — they are '
+              + 'calibrated against measurement instead. Overcommit ratios are never altered by the platform '
+              + 'selection. Full derivations and citations: METHODOLOGY.md.', pageW() - margin * 2);
+            // Keep the footnote off the page footer (same guard as the network section).
+            if (vy + prov.length * 3 + 4 > pageH() - CONTENT_BOTTOM) { doc.addPage('a4', 'p'); vy = CONTENT_TOP; }
+            doc.text(prov, margin, vy); vy += prov.length * 3 + 5;
+
+            if (virt.overheadScenarios && virt.overheadScenarios.length) {
+              vy = table({ startY: vy, styles: { font: 'helvetica', fontSize: 8, cellPadding: 1.5 },
+                head: [['Overhead by cluster size', 'CPU (threads)', 'RAM (GB)', 'Disk (GB)']],
+                body: virt.overheadScenarios.map(r => [
+                  // ASCII only: jsPDF's standard fonts are WinAnsi-encoded, and a
+                  // character outside that set renders as garbage and mangles the
+                  // cell's letter spacing. test/pdf.js lints for this.
+                  `${r.nodes} node(s) / ${r.vms} VM(s)${r.current ? '  (this design)' : ''}`,
+                  r.cpu.toFixed(1), r.ram.toFixed(0), r.storage > 0 ? fmt(Math.round(r.storage)) : '—',
+                ]) }) + 6;
+            }
+          }
 
           const resultBody = virt.mode === 'pool'
             ? [

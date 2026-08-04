@@ -1,0 +1,644 @@
+{
+  "virtualization": {
+    "mode": "auto",
+    "hosts": [
+      {
+        "id": "scr9a8a",
+        "name": "Host Type 1",
+        "count": 1,
+        "primary": true,
+        "sockets": 2,
+        "coresPerSocket": 24,
+        "threadsPerCore": 2,
+        "ram": 512,
+        "storage": 7680,
+        "gpus": 1,
+        "reserveRam": 0,
+        "reserveThreads": 0
+      }
+    ],
+    "overcommit": {
+      "vcpu": 1,
+      "ram": 1
+    },
+    "cluster": {
+      "maxVmsPerNode": 40,
+      "faultTolerance": 2,
+      "replication": 3,
+      "decidedNodes": 0
+    },
+    "storage": {
+      "external": false,
+      "connection": "iscsi",
+      "capacityNote": ""
+    },
+    "dr": {
+      "sites": 2,
+      "note": ""
+    },
+    "customVms": [
+      {
+        "id": "3hc9opi",
+        "name": "Custom VM",
+        "count": 1,
+        "cpu": 4,
+        "ram": 8,
+        "storage": 100,
+        "gpu": 0
+      },
+      {
+        "id": "m4dusus",
+        "name": "Custom VM",
+        "count": 1,
+        "cpu": 4,
+        "ram": 8,
+        "storage": 100,
+        "gpu": 0
+      }
+    ]
+  },
+  "nodeProfiles": [
+    {
+      "id": "p_small",
+      "name": "Small (4c / 8g)",
+      "cpu": 4,
+      "ram": 8,
+      "storage": 100,
+      "gpus": 0
+    },
+    {
+      "id": "p_medium",
+      "name": "Medium (8c / 16g)",
+      "cpu": 8,
+      "ram": 16,
+      "storage": 200,
+      "gpus": 0
+    },
+    {
+      "id": "p_large",
+      "name": "Large (16c / 64g)",
+      "cpu": 16,
+      "ram": 64,
+      "storage": 500,
+      "gpus": 0
+    },
+    {
+      "id": "p_gpu",
+      "name": "GPU (16c / 32g / 1 GPU)",
+      "cpu": 16,
+      "ram": 32,
+      "storage": 250,
+      "gpus": 1
+    },
+    {
+      "id": "p_mgmt",
+      "name": "Management (4c / 16g)",
+      "cpu": 8,
+      "ram": 16,
+      "storage": 100,
+      "gpus": 0
+    }
+  ],
+  "clusters": [
+    {
+      "enabled": true,
+      "role": "management",
+      "customApps": [],
+      "id": "hdcaxh4",
+      "name": "Rancher Management",
+      "base": {
+        "controlPlane": {
+          "enabled": true,
+          "custom": false,
+          "profileId": "p_mgmt",
+          "faultTolerance": 0,
+          "nodes": [
+            {
+              "id": "9bfshys",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 100,
+              "gpus": 0
+            },
+            {
+              "id": "ijfw5yr",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 100,
+              "gpus": 0
+            },
+            {
+              "id": "lbxq259",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 100,
+              "gpus": 0
+            }
+          ]
+        },
+        "gpuWorkerNodes": {
+          "enabled": false,
+          "custom": false,
+          "profileId": "p_gpu",
+          "faultTolerance": 0,
+          "nodes": [
+            {
+              "id": "t65qwgh",
+              "cpu": 16,
+              "ram": 32,
+              "storage": 250,
+              "gpus": 1
+            }
+          ]
+        },
+        "generalWorkerNodes": {
+          "enabled": false,
+          "custom": false,
+          "profileId": "p_medium",
+          "faultTolerance": 0,
+          "nodes": [
+            {
+              "id": "daqksz6",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            }
+          ]
+        }
+      },
+      "services": {
+        "suseSecurity": {
+          "selected": false,
+          "profile": "default"
+        },
+        "suseStorage": {
+          "selected": false,
+          "profile": "default"
+        },
+        "privateRegistry": {
+          "selected": false,
+          "profile": "default"
+        },
+        "milvus": {
+          "selected": false,
+          "profile": "minimal"
+        },
+        "ollama": {
+          "selected": false,
+          "profile": "default"
+        },
+        "openWebUI": {
+          "selected": false,
+          "profile": "default"
+        },
+        "observability": {
+          "selected": false,
+          "profile": "20_ha"
+        }
+      }
+    },
+    {
+      "enabled": true,
+      "role": "workload",
+      "customApps": [],
+      "id": "ar0jd94",
+      "name": "Cluster DEV",
+      "base": {
+        "controlPlane": {
+          "custom": false,
+          "nodes": [
+            {
+              "id": "vsip0rr",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            },
+            {
+              "id": "owijavg",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            },
+            {
+              "id": "erkka6m",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            }
+          ],
+          "enabled": true,
+          "faultTolerance": 0,
+          "profileId": "p_medium"
+        },
+        "gpuWorkerNodes": {
+          "custom": true,
+          "nodes": [
+            {
+              "id": "1fyuv6r",
+              "cpu": 16,
+              "ram": 32,
+              "storage": 250,
+              "gpus": 1
+            },
+            {
+              "id": "kn84kod",
+              "cpu": 16,
+              "ram": 32,
+              "storage": 250,
+              "gpus": 1
+            }
+          ],
+          "enabled": false,
+          "faultTolerance": 0,
+          "profileId": "p_gpu"
+        },
+        "generalWorkerNodes": {
+          "custom": true,
+          "nodes": [
+            {
+              "id": "duu203g",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 100,
+              "gpus": 0
+            },
+            {
+              "id": "jijawn2",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 100,
+              "gpus": 0
+            },
+            {
+              "id": "5ngzwox",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 100,
+              "gpus": 0
+            }
+          ],
+          "enabled": true,
+          "faultTolerance": 0,
+          "profileId": "p_medium"
+        }
+      },
+      "services": {
+        "suseSecurity": {
+          "selected": true,
+          "profile": "default"
+        },
+        "suseStorage": {
+          "selected": false,
+          "profile": "default"
+        },
+        "privateRegistry": {
+          "selected": false,
+          "profile": "default"
+        },
+        "milvus": {
+          "selected": false,
+          "profile": "minimal"
+        },
+        "ollama": {
+          "selected": false,
+          "profile": "default"
+        },
+        "openWebUI": {
+          "selected": false,
+          "profile": "default"
+        },
+        "observability": {
+          "selected": false,
+          "profile": "50_non_ha"
+        }
+      }
+    },
+    {
+      "enabled": true,
+      "role": "observability",
+      "customApps": [],
+      "id": "vvu2s33",
+      "name": "Observability",
+      "base": {
+        "controlPlane": {
+          "enabled": true,
+          "custom": false,
+          "profileId": "p_small",
+          "faultTolerance": 0,
+          "nodes": [
+            {
+              "id": "qhiz2de",
+              "cpu": 4,
+              "ram": 8,
+              "storage": 100,
+              "gpus": 0
+            },
+            {
+              "id": "4nfr6xk",
+              "cpu": 4,
+              "ram": 8,
+              "storage": 100,
+              "gpus": 0
+            },
+            {
+              "id": "ubinetq",
+              "cpu": 4,
+              "ram": 8,
+              "storage": 100,
+              "gpus": 0
+            }
+          ]
+        },
+        "gpuWorkerNodes": {
+          "enabled": false,
+          "custom": false,
+          "profileId": "p_gpu",
+          "faultTolerance": 0,
+          "nodes": [
+            {
+              "id": "jspm5sf",
+              "cpu": 16,
+              "ram": 32,
+              "storage": 250,
+              "gpus": 1
+            }
+          ]
+        },
+        "generalWorkerNodes": {
+          "enabled": true,
+          "custom": true,
+          "profileId": "p_medium",
+          "faultTolerance": 0,
+          "nodes": [
+            {
+              "id": "uf0hn13",
+              "cpu": 16,
+              "ram": 64,
+              "storage": 200,
+              "gpus": 0
+            }
+          ]
+        }
+      },
+      "services": {
+        "suseSecurity": {
+          "selected": false,
+          "profile": "default"
+        },
+        "suseStorage": {
+          "selected": false,
+          "profile": "default"
+        },
+        "privateRegistry": {
+          "selected": false,
+          "profile": "default"
+        },
+        "milvus": {
+          "selected": false,
+          "profile": "minimal"
+        },
+        "ollama": {
+          "selected": false,
+          "profile": "default"
+        },
+        "openWebUI": {
+          "selected": false,
+          "profile": "default"
+        },
+        "observability": {
+          "selected": true,
+          "profile": "50_non_ha"
+        }
+      }
+    },
+    {
+      "id": "wp2dsie",
+      "name": "Cluster Homologação",
+      "role": "workload",
+      "enabled": true,
+      "base": {
+        "controlPlane": {
+          "enabled": true,
+          "custom": false,
+          "profileId": "p_medium",
+          "faultTolerance": 0,
+          "nodes": [
+            {
+              "id": "9xvtb0v",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            },
+            {
+              "id": "gofwh5j",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            },
+            {
+              "id": "0aoe2dl",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            }
+          ]
+        },
+        "gpuWorkerNodes": {
+          "enabled": false,
+          "custom": false,
+          "profileId": "p_gpu",
+          "faultTolerance": 0,
+          "nodes": [
+            {
+              "id": "axe42k8",
+              "cpu": 16,
+              "ram": 32,
+              "storage": 250,
+              "gpus": 1
+            }
+          ]
+        },
+        "generalWorkerNodes": {
+          "enabled": true,
+          "custom": false,
+          "profileId": "p_medium",
+          "faultTolerance": 0,
+          "nodes": [
+            {
+              "id": "h51uzxl",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            },
+            {
+              "id": "f8fx4s1",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            },
+            {
+              "id": "jww08xt",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            }
+          ]
+        }
+      },
+      "services": {
+        "suseSecurity": {
+          "selected": true,
+          "profile": "default"
+        },
+        "suseStorage": {
+          "selected": false,
+          "profile": "default"
+        },
+        "privateRegistry": {
+          "selected": false,
+          "profile": "default"
+        },
+        "milvus": {
+          "selected": false,
+          "profile": "minimal"
+        },
+        "ollama": {
+          "selected": false,
+          "profile": "default"
+        },
+        "openWebUI": {
+          "selected": false,
+          "profile": "default"
+        },
+        "observability": {
+          "selected": false,
+          "profile": "20_ha"
+        }
+      },
+      "customApps": []
+    },
+    {
+      "id": "e80uvxh",
+      "name": "Cluster Produção",
+      "role": "workload",
+      "enabled": true,
+      "base": {
+        "controlPlane": {
+          "enabled": true,
+          "custom": false,
+          "profileId": "p_medium",
+          "faultTolerance": 0,
+          "nodes": [
+            {
+              "id": "y5bgnxs",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            },
+            {
+              "id": "kzoade5",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            },
+            {
+              "id": "1y3iklu",
+              "cpu": 8,
+              "ram": 16,
+              "storage": 200,
+              "gpus": 0
+            }
+          ]
+        },
+        "gpuWorkerNodes": {
+          "enabled": false,
+          "custom": false,
+          "profileId": "p_gpu",
+          "faultTolerance": 0,
+          "nodes": [
+            {
+              "id": "pwzebdx",
+              "cpu": 16,
+              "ram": 32,
+              "storage": 250,
+              "gpus": 1
+            }
+          ]
+        },
+        "generalWorkerNodes": {
+          "enabled": true,
+          "custom": false,
+          "profileId": "p_large",
+          "faultTolerance": 0,
+          "nodes": [
+            {
+              "id": "v16wv8a",
+              "cpu": 16,
+              "ram": 64,
+              "storage": 500,
+              "gpus": 0
+            },
+            {
+              "id": "x7lupim",
+              "cpu": 16,
+              "ram": 64,
+              "storage": 500,
+              "gpus": 0
+            },
+            {
+              "id": "12idpld",
+              "cpu": 16,
+              "ram": 64,
+              "storage": 500,
+              "gpus": 0
+            }
+          ]
+        }
+      },
+      "services": {
+        "suseSecurity": {
+          "selected": false,
+          "profile": "default"
+        },
+        "suseStorage": {
+          "selected": false,
+          "profile": "default"
+        },
+        "privateRegistry": {
+          "selected": false,
+          "profile": "default"
+        },
+        "milvus": {
+          "selected": false,
+          "profile": "minimal"
+        },
+        "ollama": {
+          "selected": false,
+          "profile": "default"
+        },
+        "openWebUI": {
+          "selected": false,
+          "profile": "default"
+        },
+        "observability": {
+          "selected": false,
+          "profile": "20_ha"
+        }
+      },
+      "customApps": []
+    }
+  ],
+  "selectedClusterId": "e80uvxh"
+}

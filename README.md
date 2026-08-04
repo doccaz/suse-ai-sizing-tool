@@ -26,6 +26,7 @@ The SUSE AI Sizing Architect lets you model a cluster, attach SUSE AI services a
 - **SUSE AI services** — NeuVector (Security), Longhorn (Storage), Private Registry, Milvus, Ollama, Open WebUI and Observability, several with selectable sizing profiles.
 - **Custom applications** — add arbitrary workloads so their resource demand is folded into every total. A built-in **App Catalog** offers common workloads, plus an optional **AI sizing lookup** for anything not listed: bring your own API key for **Anthropic (Claude)**, **OpenAI (GPT)** or **Google (Gemini)** and the model estimates conservative CPU / RAM / storage / GPU. The key is stored only in your browser and sent directly to the chosen provider — never to any backend — and calls are billed to your own account.
 - **Bare-metal virtualization sizing** — plan the SUSE Virtualization (Harvester) hosts that run SUSE AI. Define one or more **physical host types** (sockets/cores/threads, RAM, storage, GPUs, optional hypervisor reservation), set CPU/RAM overcommit and an N+x resiliency policy, and the tool treats every cluster node as a VM to derive sizing. **GPU VMs are pinned 1:1** (never overcommitted) automatically. Two modes: **Auto** (how many identical hosts are needed, with per-host utilization in normal and degraded states) and **Pool** (capacity-check a mixed/heterogeneous inventory, reserving the largest hosts for failure). Supports extra VMs, external storage arrays (FC / iSCSI / DAS / CSI / NFS), and multi-site DR. Full formulas, assumptions and references are documented in [METHODOLOGY.md](METHODOLOGY.md).
+- **Hypervisor platform overhead** — pick your platform (**SUSE Virtualization / Harvester**, OpenShift Virtualization, vSphere/ESXi, Nutanix AHV, Proxmox VE) and the real management-plane cost is applied automatically: per-node kubelet reserve, platform and storage pods, cluster services, per-VM hypervisor overhead, storage-engine memory and per-GPU passthrough. Harvester is modelled in depth and **calibrated against a measured single-node vs 3-node benchmark**, with toggles for rancher-monitoring, rancher-logging, the Longhorn V2 data engine and the GPU stack. Cluster services are counted **once**, not per node, so overhead does **not** scale linearly with cluster size — an "Overhead by Cluster Size" table shows the curve. Figures are denominated in **scheduler requests** (what actually blocks VM placement); memory that is consumed but never requested — chiefly Longhorn's replica engines — is tracked separately and enforced by its own design rule, so the tool won't recommend a host that OOMs. **Every coefficient is cited and marked Verified, Measured or Estimate**, and **every one is editable**. Selecting a platform never alters your overcommit ratios. Each platform also carries a **model-completeness** marker: Harvester is *Calibrated* against measurement; the others are *Modelled* — every significant category is covered (management plane, storage service, per-node and per-VM terms) but from vendor documentation rather than measurement, so treat cross-platform comparison as indicative of shape rather than a benchmark.
 - **Live totals** — a sticky sidebar shows total capacity vs. demand and remaining headroom in real time, flagging GPU deficits automatically.
 - **Architecture diagram** — an auto-generated visual of your cluster and the services running on it.
 - **Network & firewall rules** — the required ports are derived from your selected components.
@@ -90,6 +91,9 @@ const APP_VERSION = "2.4.0";                                          // shown i
 .
 ├── index.html                 # the entire application
 ├── METHODOLOGY.md             # sizing formulas, assumptions & references
+├── test/                      # test suite (see test/README.md)
+│   ├── run.sh                 # ./test/run.sh runs everything
+│   └── golden-baseline.json   # sizing output captured pre-v2.5.0
 ├── assets/
 │   ├── suse-ai-neg-green-stacked.svg   # header/About logo (dark theme)
 │   └── suse-ai-pos-green-stacked.svg   # PDF/light-background logo
@@ -98,6 +102,21 @@ const APP_VERSION = "2.4.0";                                          // shown i
 ├── LICENSE
 └── README.md
 ```
+
+## Tests
+
+The app has no build step, so the tests **extract the real functions out of
+`index.html`** and run them under Node — they cannot drift from the code.
+
+```bash
+npm install --no-save @babel/core @babel/preset-react puppeteer-core
+./test/run.sh
+```
+
+They cover the JSX compiling, the sizing maths (anchored on Harvester's
+published 16-core → 1020 mCPU example), import compatibility with older saved
+configurations, docs-vs-code citation consistency, a golden-baseline regression,
+and a headless-Chrome smoke test. See [test/README.md](test/README.md).
 
 ## Version history
 
@@ -116,6 +135,9 @@ The commit history tracks the evolution of the tool from its first app.new scaff
 | 2026-06-24 | **v2.3.0** | Multi-cluster fleet model: in-tab cluster switcher, suggested Rancher Management cluster, dedicated Observability cluster (suggested when the service is added), per-cluster + fleet rollup totals, and fleet-wide aggregation across the diagram, virtualization and PDF report |
 | 2026-06-24 | **v2.3.1** | Consistent all-vector PDF report (Helvetica) with a shared header/footer, page numbers and a vectorized fleet-summary page |
 | 2026-06-24 | **v2.4.0** | App Catalog AI sizing lookup is now multi-provider (bring-your-own-key for Anthropic, OpenAI or Google Gemini), with a per-provider key store and an explanatory tooltip |
+| 2026-08-04 | **v2.5.0** | Hypervisor platform overhead model: selectable platform (Harvester, OpenShift Virt, vSphere, AHV, Proxmox) applying per-node, control-plane, per-VM and per-device overhead; Harvester add-on toggles; per-coefficient sources with Verified/Estimate provenance in the UI and PDF; "Overhead by Cluster Size" comparison table. Configurations saved before this release load with no platform selected, so their numbers are unchanged until you opt in |
+| 2026-08-04 | **v2.7.0** | Overhead models completed for the non-Harvester platforms. Added the management plane (**vCenter**, sized from Broadcom's published deployment-size table by cluster size; **Prism Central**; Proxmox cluster services; OpenShift's 3 × 4 vCPU/16 GB control plane) and the **storage services** (vSAN, Ceph, ODF) — the latter expressed per TB of raw disk and dropping to zero on external storage. OpenShift gains the KubeVirt per-VM CPU term. Platform depth markers reworked: Harvester is **Calibrated**, the rest are now **Modelled** rather than partial/indicative. The remaining differences between platforms are architectural (Longhorn *reserves* CPU from the scheduler; vSAN and Ceph merely consume it) rather than gaps — see METHODOLOGY.md § 7a.1b |
+| 2026-08-04 | **v2.6.0** | Harvester overhead recalibrated against a [measured single-node vs 3-node benchmark](https://gist.github.com/Vicente-Cheng/ae8d5ce743f94c0c9a333574813bc777). Four corrections: cluster services are now counted **once**, not per node (a 3-node cluster measures 2.19× a single node, not 3×); per-VM overhead raised 166 → 421 MiB and given a CPU term; Longhorn's storage-engine memory (~136 MiB per replica per VM disk) added as a physical-RAM term with its own design rule; Longhorn's 12% is of *allocatable*, not capacity. New **Measured** provenance tier, and overhead is now explicitly denominated in scheduler requests. **If you are on v2.5.0 with a platform selected, your numbers will change** — small clusters get *lighter* (3 nodes / 50 VMs: 64 → 44 GB, as the control plane stops being counted three times) while VM-dense ones get *heavier* (7 nodes / 200 VMs: 126 → 133 GB and 109 → 122 threads, from the corrected per-VM terms), and a physical-RAM figure that v2.5.0 did not report at all now appears (+46 to +133 GB across those cases). Pre-v2.5.0 configurations remain unaffected — they still load with no platform selected |
 
 ## Disclaimer
 
