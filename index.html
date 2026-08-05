@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.7.0";
+      const APP_VERSION = "2.8.0";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -476,6 +476,8 @@
         odfReqs:    'https://docs.redhat.com/en/documentation/red_hat_openshift_data_foundation/4.20/html/planning_your_deployment/infrastructure-requirements_rhodf',
         ocpNodes:   'https://github.com/openshift/openshift-docs/blob/main/modules/master-node-sizing.adoc',
         prismCentral: 'https://portal.nutanix.com/page/documents/details?targetId=Web-Console-Guide-Prism-v6_8:wc-cvm-memory-configuration-c.html',
+        kvOverhead: 'kubevirt/kubevirt pkg/virt-controller/services/template.go:115-119 + renderresources.go GetMemoryOverhead()',
+        hvRatio:    'harvester/harvester pkg/settings/settings_helper.go (AdditionalGuestMemoryOverheadRatioDefault = "1.5")',
       };
 
       /* Term A. Harvester derives its kubelet CPU reservation from the GKE
@@ -565,22 +567,27 @@
           ],
           infraNode: [],
           infraCount: 0,
-          /* Term C: KubeVirt lineage, recalibrated. The published Red Hat form is
-             kept, but the fixed term is solved from the measured 421 MiB request
-             overhead of a 2 vCPU / 2 GiB guest:
-               421 − 0.002×2048 − 8×2 = 400.9 MiB.
-             One data point, so ramFactor and ramPerVcpuMiB remain unvalidated.
+          /* Term C: KubeVirt's real GetMemoryOverhead(), not an approximation of
+             it. Constants verified identical in KubeVirt v1.6.3 (the version the
+             benchmark ran) and main. Harvester then multiplies by its
+             AdditionalGuestMemoryOverheadRatio, which defaults to 1.5.
+             Cross-check: a 2 vCPU / 2 GiB guest gives
+               (220 + 8 + 32) + 8x2 + 2048/512 = 280 MiB, x1.5 = 420 MiB
+             against 421 MiB measured — 0.25% apart, from independent evidence.
              cpuMilli is the launcher CPU beyond vCPU/overcommit (205m measured
              per VM, less 2000m/16 at Harvester's default 1600% ratio). */
-          perVm: { ramFactor: 1.002, ramFixedMiB: 400, ramPerVcpuMiB: 8, cpuMilli: 80, tier: 'measured',
-                   src: `${OVERHEAD_SRC.benchmark}; ${OVERHEAD_SRC.ocpMem}; ${OVERHEAD_SRC.kubevirt}` },
+          perVm: { kind: 'kubevirt', fixedMiB: 220, perVcpuMiB: 8, ioThreadMiB: 8, graphicsMiB: 32,
+                   pagetableDivisor: 512, overheadRatio: 1.5, cpuMilli: 80, tier: 'verified',
+                   src: `${OVERHEAD_SRC.kvOverhead}; ${OVERHEAD_SRC.hvRatio}; ${OVERHEAD_SRC.benchmark}` },
           // PHYSICAL, not a request: one Longhorn replica engine per VM disk.
           // 60273 MiB / (148 VMs x 3 replicas) = 135.8 MiB per replica.
           perVmDiskPhysical: { ramMiB: 136, tier: 'measured', src: OVERHEAD_SRC.benchmark },
           // Measured virt-launcher RSS for a 2 GiB guest — physical only, used by
           // the physical-capacity design rule, never by the sizing totals.
           perVmPhysicalRamMiB: 683,
-          perDevice: { ramGiB: 1, cpu: 0, tier: 'estimate', src: OVERHEAD_SRC.ocpMem },
+          // Term D is KubeVirt's VFIO branch: 1 GiB per passthrough device,
+          // because VFIO locks all guest RAM plus the MMIO window.
+          perDevice: { ramGiB: 1, cpu: 0, tier: 'verified', src: OVERHEAD_SRC.kvOverhead },
           // Term E: Harvester overrides Longhorn's own 30% default down to 0%.
           storagePct: 0, storagePctMax: 30, storageTier: 'verified', storageSrc: `${OVERHEAD_SRC.hvSrcCos}; ${OVERHEAD_SRC.lhStorage}`,
           /* Add-on coefficients stay ESTIMATE: the benchmark ran with neither
@@ -629,10 +636,18 @@
               tier: 'verified', src: OVERHEAD_SRC.ocpNodes },
           ],
           infraCount: 3,
-          // Same KubeVirt launcher CPU as Harvester; Red Hat does not publish a
-          // figure, so the Harvester measurement is carried across.
-          perVm: { ramFactor: 1.002, ramFixedMiB: 146, ramPerVcpuMiB: 8, cpuMilli: 80, tier: 'verified', src: OVERHEAD_SRC.ocpMem },
-          perDevice: { ramGiB: 1, cpu: 0, tier: 'verified', src: OVERHEAD_SRC.ocpMem },
+          /* Same KubeVirt formula as Harvester, but OpenShift leaves
+             AdditionalGuestMemoryOverheadRatio at the KubeVirt default of 1 —
+             which is the whole reason its per-VM cost is ~1/1.5 of Harvester's.
+             Red Hat's published "(1.002 x RAM) + 146 MiB + 8 MiB/vCPU" is an
+             older, coarser statement of the same thing: 1.002 is the page-table
+             term (RAM/512), and 146 MiB predates the current 220 MiB of fixed
+             components. The source formula supersedes it.
+             Launcher CPU is carried across from the Harvester measurement. */
+          perVm: { kind: 'kubevirt', fixedMiB: 220, perVcpuMiB: 8, ioThreadMiB: 8, graphicsMiB: 32,
+                   pagetableDivisor: 512, overheadRatio: 1, cpuMilli: 80, tier: 'verified',
+                   src: `${OVERHEAD_SRC.kvOverhead}; ${OVERHEAD_SRC.ocpMem}` },
+          perDevice: { ramGiB: 1, cpu: 0, tier: 'verified', src: OVERHEAD_SRC.kvOverhead },
           storagePct: 0, storagePctMax: 30, storageTier: 'estimate', storageSrc: OVERHEAD_SRC.ocpMem,
           addons: {
             /* ODF/Ceph: Red Hat publishes "2 CPU and 5 GiB per device added to a
@@ -761,6 +776,70 @@
         indicative: { label: 'Indicative only', cls: 'border-amber-500/40 text-amber-400 bg-amber-500/10',
                       blurb: 'A sketch from vendor documentation. Several significant categories are not modelled at all, so the total understates real overhead — do not compare it against a calibrated platform.' },
       };
+      /* The one declaration of which coefficients are editable, and under which
+         override key. The panel renders from this and the tests assert every
+         entry actually moves the numbers — the v2.8.0 panel drifted from the
+         engine and shipped three dead per-VM controls precisely because these
+         two lists were maintained separately. */
+      const overrideSchema = (P) => {
+        const groups = [];
+        const F = (key, label, dflt, step = 0.1, unit = '') => ({ key, label, dflt, step, unit });
+        // A per-node / cluster / infra line contributes whichever of the four
+        // coefficient forms it actually declares.
+        const itemFields = (prefix, i) => {
+          const f = [];
+          // Physical lines contribute RAM only — the engine ignores their CPU,
+          // so offering a CPU control would be a dead knob.
+          const ramOnly = i.basis === 'physical';
+          if (!ramOnly && i.cpu != null) f.push(F(`${prefix}${i.key}.cpu`, 'threads/node', i.cpu));
+          if (i.ram      != null) f.push(F(`${prefix}${i.key}.ram`,      'GB/node',      i.ram));
+          if (!ramOnly && i.cpuPct != null) f.push(F(`${prefix}${i.key}.cpuPct`, '× allocatable CPU', i.cpuPct, 0.01));
+          if (i.ramPct   != null) f.push(F(`${prefix}${i.key}.ramPct`,   '× host RAM',   i.ramPct, 0.01));
+          if (!ramOnly && i.cpuPerTb != null) f.push(F(`${prefix}${i.key}.cpuPerTb`, 'threads/TB', i.cpuPerTb, 0.05));
+          if (i.ramPerTb != null) f.push(F(`${prefix}${i.key}.ramPerTb`, 'GB/TB',        i.ramPerTb, 0.05));
+          return f;
+        };
+        const push = (title, items) => { if (items.length) groups.push({ title, items }); };
+
+        (P.perNode || []).forEach(i =>
+          push(i.label + (i.basis === 'physical' ? '  (physical RAM only)' : ''), itemFields('', i)));
+        (P.cluster || []).forEach(i =>
+          push(`Once per cluster: ${i.label}`, itemFields('cluster.', i)));
+        (P.infraNode || []).forEach(i =>
+          push(`Control plane: ${i.label}`, itemFields('infra.', i)));
+        Object.entries(P.addons || {}).forEach(([k, a]) => {
+          if (a.perNode)   push(`Add-on: ${a.label}`, itemFields('', { key: `addon.${k}`, ...a.perNode }));
+          if (a.cluster)   push(`Add-on: ${a.label} (cluster-wide)`, itemFields('cluster.', { key: `addon.${k}`, ...a.cluster }));
+          if (a.infraNode) push(`Add-on: ${a.label} (control plane)`, itemFields('infra.', { key: `addon.${k}`, ...a.infraNode }));
+        });
+
+        if (P.perVm) {
+          const v = P.perVm, f = [];
+          if (v.kind === 'kubevirt') {
+            f.push(F('perVm.fixedMiB', 'MiB fixed', v.fixedMiB, 1));
+            f.push(F('perVm.perVcpuMiB', 'MiB/vCPU', v.perVcpuMiB, 1));
+            f.push(F('perVm.ioThreadMiB', 'MiB IOThread', v.ioThreadMiB, 1));
+            f.push(F('perVm.graphicsMiB', 'MiB graphics', v.graphicsMiB, 1));
+            f.push(F('perVm.pagetableDivisor', 'RAM ÷ n (page tables)', v.pagetableDivisor, 1));
+            f.push(F('perVm.overheadRatio', '× overhead ratio (1–10)', v.overheadRatio, 0.1));
+          } else {
+            f.push(F('perVm.ramFactor', '× RAM', v.ramFactor, 0.001));
+            f.push(F('perVm.ramFixedMiB', 'MiB fixed', v.ramFixedMiB, 1));
+            f.push(F('perVm.ramPerVcpuMiB', 'MiB/vCPU', v.ramPerVcpuMiB, 1));
+          }
+          if (v.cpuMilli != null) f.push(F('perVm.cpuMilli', 'm CPU/VM', v.cpuMilli, 1));
+          push('Per VM', f);
+        }
+        if (P.perVmDiskPhysical) push('Per VM disk (physical RAM only)',
+          [F('perVmDisk.ramMiB', 'MiB/replica', P.perVmDiskPhysical.ramMiB, 1)]);
+        if (P.perDevice) push('Per passthrough device', [
+          ...(P.perDevice.ramGiB != null ? [F('perDevice.ramGiB', 'GiB/device', P.perDevice.ramGiB)] : []),
+          ...(P.perDevice.cpu != null ? [F('perDevice.cpu', 'threads/device', P.perDevice.cpu)] : []),
+        ]);
+        push('Storage reserve', [F('storage.pct', `% of raw disk (max ${P.storagePctMax})`, P.storagePct, 1)]);
+        return groups;
+      };
+
       const HYPERVISOR_ORDER = ['harvester', 'ocpvirt', 'vsphere', 'ahv', 'proxmox', 'none'];
       /* Own-property lookup: imported JSON is untrusted, and a plain
          `HYPERVISORS[key]` is truthy for '__proto__' / 'constructor'. */
@@ -833,9 +912,9 @@
         const addPerNode = (item, labelPrefix) => {
           // Storage services scale with the disks in the host, so they are
           // expressed per TB of raw local disk as well as flat + %-of-node.
-          const cpu = num(val(item.key, 'cpu', item.cpu)) + num(item.cpuPct) * allocThreads
+          const cpu = num(val(item.key, 'cpu', item.cpu)) + num(val(item.key, 'cpuPct', item.cpuPct)) * allocThreads
                     + num(val(item.key, 'cpuPerTb', item.cpuPerTb)) * hostTb;
-          const ram = num(val(item.key, 'ram', item.ram)) + num(item.ramPct) * hostRam
+          const ram = num(val(item.key, 'ram', item.ram)) + num(val(item.key, 'ramPct', item.ramPct)) * hostRam
                     + num(val(item.key, 'ramPerTb', item.ramPerTb)) * hostTb;
           if (cpu <= 0 && ram <= 0) return;
           if (item.basis === 'physical') physPerNodeRam += ram;
@@ -852,8 +931,8 @@
         const infraCount = Math.min(num(P.infraCount), nodeCount || num(P.infraCount));
         let lumpCpu = 0, lumpRam = 0;
         const addInfra = (item, labelPrefix) => {
-          const cpu = num(val(`infra.${item.key}`, 'cpu', item.cpu)) + num(item.cpuPct) * allocThreads;
-          const ram = num(val(`infra.${item.key}`, 'ram', item.ram)) + num(item.ramPct) * hostRam;
+          const cpu = num(val(`infra.${item.key}`, 'cpu', item.cpu)) + num(val(`infra.${item.key}`, 'cpuPct', item.cpuPct)) * allocThreads;
+          const ram = num(val(`infra.${item.key}`, 'ram', item.ram)) + num(val(`infra.${item.key}`, 'ramPct', item.ramPct)) * hostRam;
           if ((cpu <= 0 && ram <= 0) || infraCount <= 0) return;
           lumpCpu += cpu * infraCount; lumpRam += ram * infraCount;
           lines.push({ key: `infra.${item.key}`, label: labelPrefix ? `${labelPrefix}${item.label}` : item.label,
@@ -874,9 +953,9 @@
             const z = vcsaSize(nodeCount || 1, vmCount);
             item = { ...item, cpu: z.cpu, ram: z.ram, label: `${item.label} — ${z.name} (${z.cpu} vCPU / ${z.ram} GB)` };
           }
-          const cpu = num(val(`cluster.${item.key}`, 'cpu', item.cpu)) + num(item.cpuPct) * allocThreads
+          const cpu = num(val(`cluster.${item.key}`, 'cpu', item.cpu)) + num(val(`cluster.${item.key}`, 'cpuPct', item.cpuPct)) * allocThreads
                     + num(val(`cluster.${item.key}`, 'cpuPerTb', item.cpuPerTb)) * hostTb;
-          const ram = num(val(`cluster.${item.key}`, 'ram', item.ram)) + num(item.ramPct) * hostRam
+          const ram = num(val(`cluster.${item.key}`, 'ram', item.ram)) + num(val(`cluster.${item.key}`, 'ramPct', item.ramPct)) * hostRam
                     + num(val(`cluster.${item.key}`, 'ramPerTb', item.ramPerTb)) * hostTb;
           if (cpu <= 0 && ram <= 0) return;
           if (item.basis === 'physical') physLumpRamCluster += ram;
@@ -898,20 +977,47 @@
           if (a.cluster)   addCluster({ key: `addon.${key}`, label: `${a.label} (cluster-wide)`, ...a.cluster, tier: a.tier, src: a.src }, 'Add-on: ');
         });
 
-        // ---- Term C: per-VM hypervisor overhead ----
+        /* ---- Term C: per-VM hypervisor overhead ----
+           KubeVirt platforms use the real GetMemoryOverhead() formula rather
+           than an approximation of it. Everything else keeps the simpler
+           factor/fixed/per-vCPU form, which is all their vendors publish. */
         let perVmRam = 0, physLumpRam = 0;
         if (P.perVm && vmCount > 0) {
-          const f  = num(val('perVm', 'ramFactor',   P.perVm.ramFactor), 1);
-          const fx = num(val('perVm', 'ramFixedMiB', P.perVm.ramFixedMiB));
-          const pv = num(val('perVm', 'ramPerVcpuMiB', P.perVm.ramPerVcpuMiB));
           const pc = num(val('perVm', 'cpuMilli', P.perVm.cpuMilli));   // launcher CPU beyond vCPU/overcommit
-          // (factor-1) applies to guest RAM; the fixed + per-vCPU parts are MiB.
-          const ram = (f - 1) * vmRam + (fx * vmCount + pv * vmVcpu) / 1024;
+          let ram = 0, label = '';
+          if (P.perVm.kind === 'kubevirt') {
+            /* virt-launcher pod memory overhead, per kubevirt/kubevirt:
+                 fixed  = monitor 25 + launcher 100 + virtlogd 25 + virtqemud 40 + qemu 30
+                 + guest RAM / 512      (page tables)
+                 + 8 MiB per vCPU  + 8 MiB IOThread
+                 + 32 MiB when a graphics device is auto-attached (the default)
+               then multiplied by AdditionalGuestMemoryOverheadRatio.
+               VFIO/GPU passthrough adds 1 GiB per device — that is Term D.
+               Not modelled (add via an override if you use them): arm64 pflash
+               128 MiB, TPM 53 MiB, SEV 256 MiB, exec probes 10 MiB each +100 MiB,
+               dedicated-CPU / Guaranteed QoS 100 MiB. */
+            const fx  = num(val('perVm', 'fixedMiB',    P.perVm.fixedMiB));
+            const pv  = num(val('perVm', 'perVcpuMiB',  P.perVm.perVcpuMiB));
+            const io  = num(val('perVm', 'ioThreadMiB', P.perVm.ioThreadMiB));
+            const gfx = num(val('perVm', 'graphicsMiB', P.perVm.graphicsMiB));
+            const div = Math.max(1, num(val('perVm', 'pagetableDivisor', P.perVm.pagetableDivisor), 512));
+            const ratio = Math.max(1, num(val('perVm', 'overheadRatio', P.perVm.overheadRatio), 1));
+            const miB = (fx + io + gfx) * vmCount + pv * vmVcpu + (vmRam * 1024) / div;
+            ram = (miB / 1024) * ratio;
+            label = `Per-VM overhead — ${vmCount} VM(s): (${fx} + ${io} + ${gfx} MiB + ${pv} MiB/vCPU + RAM/${div})`
+                  + `${ratio !== 1 ? ` x ${ratio} overhead ratio` : ''}${pc ? ` + ${pc}m CPU` : ''}`;
+          } else {
+            const f  = num(val('perVm', 'ramFactor',   P.perVm.ramFactor), 1);
+            const fx = num(val('perVm', 'ramFixedMiB', P.perVm.ramFixedMiB));
+            const pv = num(val('perVm', 'ramPerVcpuMiB', P.perVm.ramPerVcpuMiB));
+            ram = (f - 1) * vmRam + (fx * vmCount + pv * vmVcpu) / 1024;
+            label = `Per-VM overhead — ${vmCount} VM(s) (${f} x RAM + ${fx} MiB + ${pv} MiB/vCPU${pc ? ` + ${pc}m CPU` : ''})`;
+          }
           const cpu = (pc * vmCount) / 1000;
           if (ram > 0 || cpu > 0) {
             perVmRam = ram; lumpRam += ram; lumpCpu += cpu;
-            lines.push({ key: 'perVm', label: `Per-VM overhead — ${vmCount} VM(s) (${f} x RAM + ${fx} MiB + ${pv} MiB/vCPU${pc ? ` + ${pc}m CPU` : ''})`,
-                         scope: 'per-vm', basis: 'request', cpu, ram, tier: P.perVm.tier, src: P.perVm.src });
+            lines.push({ key: 'perVm', label, scope: 'per-vm', basis: 'request',
+                         cpu, ram, tier: P.perVm.tier, src: P.perVm.src });
           }
         }
 
@@ -2827,44 +2933,19 @@
                         </div>
                       )}
                       <div className="grid sm:grid-cols-2 gap-3">
-                        {(P.perNode || []).filter(i => i.cpu != null || i.ram != null).map(i => (
-                          <div key={i.key} className="border border-suse-border rounded p-2">
-                            <p className="text-[11px] text-gray-300 mb-1">{i.label} <TierBadge tier={i.tier} src={i.src} /></p>
-                            <div className="grid grid-cols-2 gap-2">
-                              <OverrideField label="threads/node" k={`${i.key}.cpu`} dflt={i.cpu} overrides={overrides} onSet={setOverheadOverride} />
-                              <OverrideField label="GB/node" k={`${i.key}.ram`} dflt={i.ram} overrides={overrides} onSet={setOverheadOverride} />
+                        {/* Rendered from overrideSchema() so the controls cannot
+                            drift from what the engine actually honours. */}
+                        {overrideSchema(P).map(g => (
+                          <div key={g.title} className="border border-suse-border rounded p-2">
+                            <p className="text-[11px] text-gray-300 mb-1">{g.title}</p>
+                            <div className={`grid gap-2 ${g.items.length > 2 ? 'grid-cols-3' : 'grid-cols-2'}`}>
+                              {g.items.map(f => (
+                                <OverrideField key={f.key} label={f.label} k={f.key} dflt={f.dflt}
+                                  step={f.step} overrides={overrides} onSet={setOverheadOverride} />
+                              ))}
                             </div>
                           </div>
                         ))}
-                        {(P.infraNode || []).map(i => (
-                          <div key={i.key} className="border border-suse-border rounded p-2">
-                            <p className="text-[11px] text-gray-300 mb-1">Control plane: {i.label} <TierBadge tier={i.tier} src={i.src} /></p>
-                            <div className="grid grid-cols-2 gap-2">
-                              <OverrideField label="threads/node" k={`infra.${i.key}.cpu`} dflt={i.cpu} overrides={overrides} onSet={setOverheadOverride} />
-                              <OverrideField label="GB/node" k={`infra.${i.key}.ram`} dflt={i.ram} overrides={overrides} onSet={setOverheadOverride} />
-                            </div>
-                          </div>
-                        ))}
-                        {P.perVm && (
-                          <div className="border border-suse-border rounded p-2">
-                            <p className="text-[11px] text-gray-300 mb-1">Per-VM overhead <TierBadge tier={P.perVm.tier} src={P.perVm.src} /></p>
-                            <div className="grid grid-cols-3 gap-2">
-                              <OverrideField label="× RAM" k="perVm.ramFactor" dflt={P.perVm.ramFactor} step={0.001} overrides={overrides} onSet={setOverheadOverride} />
-                              <OverrideField label="MiB fixed" k="perVm.ramFixedMiB" dflt={P.perVm.ramFixedMiB} overrides={overrides} onSet={setOverheadOverride} />
-                              <OverrideField label="MiB/vCPU" k="perVm.ramPerVcpuMiB" dflt={P.perVm.ramPerVcpuMiB} overrides={overrides} onSet={setOverheadOverride} />
-                            </div>
-                          </div>
-                        )}
-                        <div className="border border-suse-border rounded p-2">
-                          <p className="text-[11px] text-gray-300 mb-1">Storage reserve <TierBadge tier={P.storageTier} src={P.storageSrc} /></p>
-                          <OverrideField label={`% of raw disk (max ${P.storagePctMax})`} k="storage.pct" dflt={P.storagePct} overrides={overrides} onSet={setOverheadOverride} />
-                        </div>
-                        {P.perDevice && (
-                          <div className="border border-suse-border rounded p-2">
-                            <p className="text-[11px] text-gray-300 mb-1">Per passthrough device <TierBadge tier={P.perDevice.tier} src={P.perDevice.src} /></p>
-                            <OverrideField label="GiB/device" k="perDevice.ramGiB" dflt={P.perDevice.ramGiB} overrides={overrides} onSet={setOverheadOverride} />
-                          </div>
-                        )}
                       </div>
                     </div>
                   )}

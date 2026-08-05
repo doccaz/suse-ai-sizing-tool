@@ -585,26 +585,98 @@ nothing here is validated by it.
 
 ### 7a.5 Term C — per-VM overhead
 
+#### KubeVirt platforms: the vendor's own formula
+
+Harvester and OpenShift Virtualization run each guest in a `virt-launcher` pod,
+and KubeVirt computes that pod's memory overhead in
+[`GetMemoryOverhead()`](https://github.com/kubevirt/kubevirt/blob/main/pkg/virt-controller/services/renderresources.go).
+The model implements it directly rather than approximating it:
+
+```
+fixed        = 25 MiB virt-launcher-monitor
+             + 100 MiB virt-launcher
+             +  25 MiB virtlogd
+             +  40 MiB virtqemud
+             +  30 MiB qemu                        = 220 MiB
+page tables  = guest RAM / 512
+per vCPU     = 8 MiB
+IOThread     = 8 MiB
+graphics     = 32 MiB   (auto-attached by default)
+
+overhead     = (fixed + page tables + per-vCPU + IOThread + graphics)
+               x AdditionalGuestMemoryOverheadRatio
+```
+
+Constants from `kubevirt/kubevirt pkg/virt-controller/services/template.go:115-119`,
+**verified identical in v1.6.3** (the release the benchmark ran) **and in `main`**.
+
+The ratio is a cluster setting. **Harvester defaults it to 1.5**
+(`harvester/harvester pkg/settings/settings_helper.go`,
+`AdditionalGuestMemoryOverheadRatioDefault = "1.5"`, valid range 1.0–10.0);
+KubeVirt and OpenShift leave it at **1**. That single setting is the entire
+reason a guest costs ~1.5× more on Harvester than on OpenShift — it is a
+configuration choice, not an architectural difference, and it is editable here.
+
+| Platform | fixed | per vCPU | IOThread | graphics | page tables | ratio | Tier |
+|---|---|---|---|---|---|---|---|
+| Harvester | 220 MiB | 8 MiB | 8 MiB | 32 MiB | RAM/512 | **1.5** | **Verified** |
+| OpenShift Virtualization | 220 MiB | 8 MiB | 8 MiB | 32 MiB | RAM/512 | **1** | **Verified** |
+
+> **This supersedes Red Hat's published `(1.002 × RAM) + 146 MiB + 8 MiB/vCPU`.**
+> That form is the same calculation, coarser and dated: `1.002 × RAM` *is* the
+> page-table term (`RAM/512` = 0.195% of RAM), and 146 MiB is an older snapshot
+> of the fixed components, which now total 220 MiB. v2.6.0 used the published
+> form and consequently under-counted.
+
+**Cross-check against measurement.** For the benchmark's 2 vCPU / 2 GiB guest:
+
+```
+(220 + 8 + 32) + 8x2 + 2048/512 = 280 MiB       x 1.5 = 420 MiB
+measured (§ 7a.9):                                      421 MiB
+```
+
+Two independent lines of evidence — vendor source code and a running cluster —
+agreeing to **0.25%**, with neither fitted to the other. Neither is exact: the
+residual is plausibly rounding in the reported figure, or a detail of how
+Harvester sets `requests.memory`. `test/benchmark.js` asserts both.
+
+**Terms the model does not apply**, because they depend on per-VM configuration
+the tool does not capture. Add them through a coefficient override if they apply
+to your fleet:
+
+| Condition | Overhead |
+|---|---|
+| arm64 with UEFI/pflash | +128 MiB |
+| TPM device | +53 MiB |
+| SEV / SEV-ES / SEV-SNP | +256 MiB |
+| Exec liveness/readiness probes | +10 MiB each, +100 MiB once |
+| Dedicated CPU, or Guaranteed QoS | +100 MiB |
+| DownwardMetrics disk | +1 MiB |
+
+VFIO/GPU passthrough (+1 GiB per device) *is* modelled — as Term D
+([§ 7a.6](#7a6-terms-d-and-e-and-the-other-platforms)), since the tool knows the
+device count.
+
+#### The other platforms
+
+They have no pod layer, and their vendors publish only a coarse form:
+
 ```
 per-VM RAM = (factor − 1) × guest RAM + fixed MiB + per-vCPU MiB × vCPUs
-per-VM CPU = launcher millicores, *on top of* vCPU ÷ overcommit ratio
 ```
 
-| Platform | factor | fixed | per vCPU | CPU | Tier | Source |
-|---|---|---|---|---|---|---|
-| Harvester | 1.002 | **400 MiB** | 8 MiB | **80 m** | Measured | [Benchmark](https://gist.github.com/Vicente-Cheng/ae8d5ce743f94c0c9a333574813bc777) — 421 MiB measured overhead on a 2 vCPU / 2 GiB guest; form from [OpenShift Virt](https://developers.redhat.com/blog/2025/01/31/memory-management-openshift-virtualization) / [KubeVirt](https://kubevirt.io/user-guide/compute/resources_requests_and_limits/) |
-| OpenShift Virtualization | 1.002 | 146 MiB | 8 MiB | — | Verified | [Red Hat, published formula](https://developers.redhat.com/blog/2025/01/31/memory-management-openshift-virtualization) |
-| vSphere / ESXi | 1.005 | 100 MiB | 20 MiB | — | Estimate | [VMware memory resource management](https://www.vmware.com/docs/perf-vsphere-memory_management) |
-| Proxmox VE | 1.015 | 80 MiB | 8 MiB | — | Estimate | [Proxmox hardware requirements](https://www.cherryservers.com/blog/proxmox-hardware-requirements) |
-| Nutanix AHV | 1.000 | 100 MiB | 8 MiB | — | Estimate | [AHV memory overcommit](https://www.nutanix.com/tech-center/blog/ahv-internals-memory-overcommit) — AHV's overhead is largely in the CVM (Term B) |
+| Platform | factor | fixed | per vCPU | Tier | Source |
+|---|---|---|---|---|---|
+| vSphere / ESXi | 1.005 | 100 MiB | 20 MiB | Estimate | [VMware memory resource management](https://www.vmware.com/docs/perf-vsphere-memory_management) |
+| Proxmox VE | 1.015 | 80 MiB | 8 MiB | Estimate | [Proxmox hardware requirements](https://www.cherryservers.com/blog/proxmox-hardware-requirements) |
+| Nutanix AHV | 1.000 | 100 MiB | 8 MiB | Estimate | [AHV memory overcommit](https://www.nutanix.com/tech-center/blog/ahv-internals-memory-overcommit) — AHV's overhead is largely in the CVM (Term B) |
 
-Harvester's row is **Measured**, not Verified: the *form* is Red Hat's published
-KubeVirt formula, but the fixed term is solved from a single measured data point
-(§ 7a.9). One point cannot validate three parameters, so `factor` and
-`per vCPU` are carried over unchanged from the published formula and remain
-unvalidated for Harvester specifically. Harvester's fixed term is **2.7× larger**
-than OpenShift's, which is why v2.5.0 — using OpenShift's 146 MiB — under-counted
-per-VM overhead by roughly 2.5×.
+#### Per-VM CPU
+
+`80 m` per VM on both KubeVirt platforms, on top of `vCPU ÷ overcommit`. Derived
+from the benchmark (205 m measured per VM, less 125 m for a 2-vCPU guest at
+Harvester's default 1600% CPU allocation ratio). Tier **Measured**; Red Hat
+publishes no equivalent, so the figure is carried across to OpenShift.
 
 ### 7a.5a Term C′ — storage-engine memory (physical, not a request)
 
@@ -738,10 +810,10 @@ overrides.
 | A. kubelet reserve (1.42 thr/node) | 4.26 thr | 7.10 thr |
 | B. every-node pods, excl. A (13.48 thr / 5.13 GB per node) | 40.44 thr / 15.4 GB | 67.40 thr / 25.7 GB |
 | B′. cluster services (**counted once**) | 1.69 thr / 6.3 GB | 1.69 thr / 6.3 GB |
-| C. per-VM overhead | 4.00 thr / 22.7 GB | 8.00 thr / 45.4 GB |
+| C. per-VM overhead | 4.00 thr / 23.7 GB | 8.00 thr / 47.5 GB |
 | D. per-device (no GPUs here) | — | — |
 | E. storage reserve (0% default) | — | — |
-| **Total (schedulable capacity removed)** | **50.39 thr / 44.4 GB** | **84.19 thr / 77.4 GB** |
+| **Total (schedulable capacity removed)** | **50.39 thr / 45.4 GB** | **84.19 thr / 79.4 GB** |
 | C′. storage engines — *physical RAM only* | *19.9 GB* | *39.8 GB* |
 
 Row B's per-node figure is Longhorn 11.35 (12% of allocatable = 12% × 94.58) +
@@ -752,7 +824,7 @@ as "per node (every host)".
 **Where the non-linearity now lives.** Row B′ is flat: identical at 3 nodes and
 at 5. Holding VM count fixed and going 3 → 5 nodes costs **1.23× RAM**, not
 1.667× — that is the singleton effect, and `test/e2e.js` asserts it. The
-3n/50vm → 5n/100vm columns above grow faster (1.67× CPU, 1.74× RAM) because
+3n/50vm → 5n/100vm columns above grow faster (1.67× CPU, 1.75× RAM) because
 they *also* double the VM count, and the per-VM terms scale with VMs. Two
 different effects; do not read the column ratio as the node-scaling ratio.
 

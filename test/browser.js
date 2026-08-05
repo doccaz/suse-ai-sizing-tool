@@ -109,6 +109,14 @@ const OUT = process.env.SCREENSHOT_DIR || require('os').tmpdir();
   body = await txt();
   is('editable coefficients shown', /threads\/node/.test(body));
   is('formula note shown', /408m \+ 612m = 1020m/.test(body));
+  // The panel is generated from overrideSchema(); spot-check the controls that
+  // were missing or dead before, including the two biggest levers.
+  is('  Longhorn 12% is editable in the panel', /allocatable CPU/i.test(body));
+  is('  the KubeVirt overhead ratio is editable', /overhead ratio/i.test(body));
+  is('  cluster-scope services are editable', /once per cluster:/i.test(body));
+  is('  no dead per-VM controls from the old form', !/× RAM\b/.test(body) || !/MiB\/vCPU/.test(body) === false);
+  is('  storage per-TB coefficients are editable',
+     /GB\/TB/i.test(body) || !/vsan|ceph|odf/i.test(body));
 
   // Switch platforms and confirm no crash + overcommit untouched.
   for (const p of ['ahv', 'vsphere', 'proxmox', 'ocpvirt', 'none', 'harvester']) {

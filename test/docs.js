@@ -60,6 +60,25 @@ is('add-ons are flagged as unvalidated by the benchmark',
    has('benchmark ran with neither rancher-monitoring nor rancher-logging'));
 is('the two Ranchers are disambiguated', has('Do not confuse the two Ranchers'));
 is('model completeness is documented', has('### 7a.1b Model completeness'));
+is('the KubeVirt formula is documented from source',
+   hasFlat('25 MiB virt-launcher-monitor') && hasFlat('100 MiB virt-launcher') &&
+   hasFlat('25 MiB virtlogd') && hasFlat('40 MiB virtqemud') && hasFlat('30 MiB qemu'));
+is('the fixed total is stated', hasFlat('= 220 MiB'));
+is('the page-table term is documented', hasFlat('guest RAM / 512'));
+is('the overhead ratio and its default are documented',
+   hasFlat('AdditionalGuestMemoryOverheadRatioDefault = "1.5"') && hasFlat('valid range 1.0–10.0'));
+is('the Harvester-vs-OpenShift ratio difference is explained',
+   hasFlat('configuration choice, not an architectural difference'));
+is("Red Hat's older published form is marked superseded",
+   hasFlat('This supersedes Red Hat') && hasFlat('146 MiB is an older snapshot'));
+is('the source/measurement cross-check is shown',
+   hasFlat('x 1.5 = 420 MiB') && hasFlat('agreeing to **0.25%**'));
+is('the residual is acknowledged rather than glossed',
+   hasFlat('Neither is exact'));
+is('the unmodelled KubeVirt terms are listed',
+   hasFlat('+128 MiB') && hasFlat('+53 MiB') && hasFlat('+256 MiB'));
+is('the version the constants were verified against is stated',
+   hasFlat('verified identical in v1.6.3'));
 is('the Modelled tier is defined and explained',
    hasFlat('**Modelled** means every significant category is represented'));
 is('the residual differences are explained as architectural, not artifacts',

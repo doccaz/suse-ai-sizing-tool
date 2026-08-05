@@ -80,13 +80,42 @@ is('P + S = the single-node measurement',
 near('3 nodes = 3P + S (not 3P + 3S)', totalRam(at(3), 3) * 1024,
      3 * 3421 + 2324, 1, ' MiB');
 
-console.log('\n--- Per-VM overhead ---');
-// Total request 2469 Mi for a 2 GiB guest => 421 Mi overhead.
-near('per-VM memory overhead (2 vCPU / 2 GiB)', at(3, 1).perVmRam * 1024, 421, 2, ' MiB');
+console.log('\n--- Per-VM overhead: KubeVirt formula vs the measurement ---');
+/* This is the strongest evidence in the model: a formula taken from vendor
+   source code, and an independent measurement of a running cluster, agreeing
+   without either being fitted to the other.
+
+     kubevirt/kubevirt template.go:115-119
+       fixed = 25 monitor + 100 launcher + 25 virtlogd + 40 virtqemud + 30 qemu
+     renderresources.go GetMemoryOverhead()
+       + guest RAM / 512   + 8 MiB/vCPU   + 8 MiB IOThread   + 32 MiB graphics
+     harvester settings_helper.go
+       x AdditionalGuestMemoryOverheadRatio, default 1.5                        */
+{
+  const kvBase = (220 + 8 + 32) + 8 * 2 + (2 * 1024) / 512;   // 2 vCPU / 2 GiB
+  near('  KubeVirt base overhead, from source', kvBase, 280, 0.01, ' MiB');
+  near('  x Harvester ratio 1.5', kvBase * 1.5, 420, 0.01, ' MiB');
+  // The model must reproduce that, and it must land on the measurement.
+  near('model per-VM overhead (2 vCPU / 2 GiB)', at(3, 1).perVmRam * 1024, kvBase * 1.5, 0.01, ' MiB');
+  near('  vs measured 421 MiB (independent evidence)', at(3, 1).perVmRam * 1024, 421, 1, ' MiB');
+}
+// Total request for the benchmark's guest: 2048 guest + overhead = ~2469 Mi.
+near('total per-VM request matches the benchmark', 2048 + at(3, 1).perVmRam * 1024, 2469, 1, ' MiB');
 // 205m/VM measured; 2000m/16 = 125m is the guest at Harvester's 1600% ratio.
 near('per-VM launcher CPU beyond vCPU/overcommit',
      at(3, 1).lines.find(l => l.key === 'perVm').cpu * 1000, 80, 2, 'm');
 is('per-VM overhead is not the v2.5.0 166 MiB', at(3, 1).perVmRam * 1024 > 300);
+// Each source-derived component must be individually reachable, not just the sum.
+{
+  const per = (vcpu, gib, ratio) => computePlatformOverhead('harvester',
+    { ...CFG, overrides: ratio ? { 'perVm.overheadRatio': ratio } : {} },
+    { nodeCount: 3, hostThreads: HOST_THREADS, hostRam: HOST_RAM,
+      vmCount: 1, vmRam: gib, vmVcpu: vcpu, devices: 0, replicas: 3, externalStorage: false })
+    .perVmRam * 1024;
+  near('  each extra vCPU adds 8 MiB x ratio', per(3, 2) - per(2, 2), 8 * 1.5, 0.01, ' MiB');
+  near('  page tables are guest RAM / 512', per(2, 4) - per(2, 2), (2 * 1024 / 512) * 1.5, 0.01, ' MiB');
+  near('  ratio 1 gives the raw KubeVirt figure', per(2, 2, 1), 280, 0.01, ' MiB');
+}
 // It must scale linearly with VM count.
 is('per-VM scales linearly', Math.abs(at(3, 100).perVmRam - 100 * at(3, 1).perVmRam) < 1e-6);
 

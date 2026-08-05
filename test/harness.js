@@ -39,6 +39,7 @@ const gkeFn        = block(/^\s*const gkeReservedCpu = /,                   /^\s
 const hvKubelet    = line1(/^\s*const harvesterKubeletCpu = /);
 const hypervisors  = block(/^\s*const HYPERVISORS = \{/,                    /^\s{6}\};\s*$/) || '';
 const hvKey        = block(/^\s*const hypervisorKey = /, /'none';\s*$/) || '';
+const schemaFn     = block(/^\s*const overrideSchema = \(P\) => \{/,      /^\s{6}\};\s*$/) || '';
 const numFn        = line1(/^\s*const num = \(x, fallback/);
 const overheadFn   = block(/^\s*const computePlatformOverhead = /,          /^\s{6}\};\s*$/) || '';
 
@@ -60,6 +61,7 @@ ${gkeFn}
 ${hvKubelet}
 ${hypervisors}
 ${hvKey}
+${schemaFn}
 ${numFn}
 ${overheadFn}
 function virtSummary(state) {
@@ -69,7 +71,8 @@ module.exports = { virtSummary,
   gkeReservedCpu:      typeof gkeReservedCpu      !== 'undefined' ? gkeReservedCpu      : null,
   harvesterKubeletCpu: typeof harvesterKubeletCpu !== 'undefined' ? harvesterKubeletCpu : null,
   computePlatformOverhead: typeof computePlatformOverhead !== 'undefined' ? computePlatformOverhead : null,
-  HYPERVISORS:         typeof HYPERVISORS         !== 'undefined' ? HYPERVISORS         : null };
+  HYPERVISORS:         typeof HYPERVISORS         !== 'undefined' ? HYPERVISORS         : null,
+  overrideSchema:      typeof overrideSchema      !== 'undefined' ? overrideSchema      : null };
 `;
 
 const tmp = path.join(require('os').tmpdir(), `vs-harness-${process.pid}.js`);
