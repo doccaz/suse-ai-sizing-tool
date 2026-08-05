@@ -93,7 +93,10 @@ const APP_VERSION = "2.4.0";                                          // shown i
 ├── METHODOLOGY.md             # sizing formulas, assumptions & references
 ├── test/                      # test suite (see test/README.md)
 │   ├── run.sh                 # ./test/run.sh runs everything
-│   └── golden-baseline.json   # sizing output captured pre-v2.5.0
+│   ├── golden-baseline.json   # sizing output captured pre-v2.5.0
+│   └── measurements/          # calibration data (see test/measurements/README.md)
+│       ├── capture/           # read-only capture scripts, one per platform
+│       └── validate.js        # scores a capture against the model's predictions
 ├── assets/
 │   ├── suse-ai-neg-green-stacked.svg   # header/About logo (dark theme)
 │   └── suse-ai-pos-green-stacked.svg   # PDF/light-background logo
@@ -117,6 +120,18 @@ They cover the JSX compiling, the sizing maths (anchored on Harvester's
 published 16-core → 1020 mCPU example), import compatibility with older saved
 configurations, docs-vs-code citation consistency, a golden-baseline regression,
 and a headless-Chrome smoke test. See [test/README.md](test/README.md).
+
+### Measurement pipeline
+
+Harvester is the only platform calibrated against real clusters — the rest are
+modelled from vendor docs and shipped manifests, and for vSphere and AHV the
+vendor no longer publishes the numbers at all. `test/measurements/capture/`
+holds read-only capture scripts (one per platform) that any cluster owner can
+run to produce a calibration point without knowing anything about the model;
+`test/measurements/validate.js` checks a capture against the schema and prints
+the model's prediction beside every measured figure. Captures are anonymized
+by default and `test/capture.js` lints every script for mutating commands. See
+[test/measurements/README.md](test/measurements/README.md).
 
 ## Version history
 
