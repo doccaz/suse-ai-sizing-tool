@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.11.0";
+      const APP_VERSION = "2.12.0";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -474,6 +474,13 @@
         ovnNode:    'openshift/cluster-network-operator bindata/network/ovn-kubernetes/self-hosted/ovnkube-node.yaml (125m / 1650Mi summed across the DaemonSet containers)',
         ocpMonitoring: 'openshift/cluster-monitoring-operator assets/ (prometheus-k8s x2 146m/2128Mi, alertmanager-main x2, thanos-querier x2, kube-state-metrics, metrics-server, monitoring-plugin and the operators: 240m / 3179Mi summed; the node-exporter DaemonSet is counted per node instead, and user-workload monitoring is excluded as opt-in)',
         vmwMem:     'https://www.vmware.com/docs/perf-vsphere-memory_management',
+        /* Broadcom publishes no per-VM overhead table or formula for any
+           supported release: the page says overhead depends on too many factors
+           and directs you to read VMMEM from the powered-on VM's vmware.log.
+           Cited so the coefficient's provenance reads honestly — an
+           approximation with no vendor arithmetic behind it. */
+        vmwOverheadNoTable: 'https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-1/vsphere-resource-management/administering-memory-resources/overhead-memory-on-virtual-machines.html (no published table since ESXi 5.1 — read VMMEM from vmware.log for real figures)',
+        ahvCvmFeatures: 'https://portal.nutanix.com/page/documents/details?targetId=Advanced-Admin-AOS:app-nutanix-cloud-infra-cvm-field-specifications-c.html (CVM Specifications — Cluster Feature Based; login required, figures corroborated by Nutanix community posts)',
         ahvMem:     'https://www.nutanix.com/tech-center/blog/ahv-internals-memory-overcommit',
         ahvCpu:     'https://www.nutanix.com/tech-center/blog/understanding-cpu-resource-management-in-nutanix-ahv',
         pveReqs:    'https://www.cherryservers.com/blog/proxmox-hardware-requirements',
@@ -774,7 +781,14 @@
           ],
           infraNode: [],
           infraCount: 0,
-          perVm: { ramFactor: 1.005, ramFixedMiB: 100, ramPerVcpuMiB: 20, tier: 'estimate', src: OVERHEAD_SRC.vmwMem },
+          /* There is NO vendor table or formula behind this, and there has not
+             been one since ESXi 5.1. Current Broadcom docs state the overhead
+             "depends on a large number of factors" and tell you to power the VM
+             on and grep VMMEM out of vmware.log. So this is an explicit linear
+             approximation, not a transcription — which is why it stays
+             'estimate' and why the honest fix is a measurement, not a better
+             fit. See METHODOLOGY § 7a.5. */
+          perVm: { ramFactor: 1.005, ramFixedMiB: 100, ramPerVcpuMiB: 20, tier: 'estimate', src: OVERHEAD_SRC.vmwOverheadNoTable },
           perDevice: { ramGiB: 1, cpu: 0, tier: 'estimate', src: OVERHEAD_SRC.vmwMem },
           storagePct: 0, storagePctMax: 30, storageTier: 'estimate', storageSrc: OVERHEAD_SRC.vmwMem,
           addons: {
@@ -792,11 +806,19 @@
           label: 'Nutanix AHV',
           depth: 'modelled',
           depthNote: 'The CVM and Prism Central are the overhead, and both are modelled. AHV has no scheduler-request layer, so requests and physical consumption are the same thing here.',
-          note: 'The Controller VM (CVM) is the overhead: a fixed, sizeable per-host reservation. AHV itself is light, and it cannot overcommit memory.',
+          note: 'The Controller VM (CVM) is the overhead: a fixed, sizeable per-host reservation that GROWS WITH ENABLED FEATURES — capacity-tier dedupe and RF3 each raise the CVM floor. AHV itself is light, and it cannot overcommit memory.',
           kubeletCpu: null,
           noRamOvercommit: true,
           perNode: [
-            { key: 'cvm', label: 'Controller VM (CVM)', cpu: 8, ram: 32,
+            /* Nutanix sizes the CVM as "recommended platform memory + memory for
+               each enabled feature", capped at +16 GB of features. The base here
+               is the widely-quoted 32 GB default; the feature increments are the
+               add-on toggles below rather than being baked in, because a cluster
+               with neither dedupe nor RF3 genuinely does not pay them.
+               The authoritative table is behind a Nutanix portal login, so every
+               figure stays 'estimate' — this models the SHAPE of the vendor's
+               rule (base + capped feature increments), not a transcription. */
+            { key: 'cvm', label: 'Controller VM (CVM) base allocation', cpu: 8, ram: 32,
               tier: 'estimate', src: OVERHEAD_SRC.ahvMem },
             { key: 'ahv', label: 'AHV hypervisor (<1% of host CPU)', cpuPct: 0.01, ram: 2,
               tier: 'estimate', src: OVERHEAD_SRC.ahvCpu },
@@ -813,6 +835,15 @@
           perDevice: { ramGiB: 1, cpu: 0, tier: 'estimate', src: OVERHEAD_SRC.ahvMem },
           storagePct: 0, storagePctMax: 30, storageTier: 'estimate', storageSrc: OVERHEAD_SRC.ahvMem,
           addons: {
+            /* Feature increments on top of the CVM base. Nutanix caps the total
+               feature addition at +16 GB, which both of these together reach
+               exactly — enabling both charges 16, not 20. */
+            cvmRf3:     { label: 'Redundancy Factor 3 (CVM floor rises ~8 GB)', on: false,
+                          perNode: { ram: 8 },
+                          tier: 'estimate', src: OVERHEAD_SRC.ahvCvmFeatures },
+            cvmDedupe:  { label: 'Capacity-tier deduplication (CVM floor rises ~8 GB)', on: false,
+                          perNode: { ram: 8 },
+                          tier: 'estimate', src: OVERHEAD_SRC.ahvCvmFeatures },
             prismScale: { label: 'Prism Central scale-out (3 VMs instead of 1)', on: false,
                           cluster: { cpu: 12, ram: 52 },
                           tier: 'estimate', src: OVERHEAD_SRC.prismCentral },
@@ -902,8 +933,15 @@
 
         (P.perNode || []).forEach(i =>
           push(i.label + (i.basis === 'physical' ? '  (physical RAM only)' : ''), itemFields('', i)));
+        /* A table-driven line (vCenter) must say so. Its cpu/ram here are
+           PLACEHOLDERS that the engine replaces with the resolved row before
+           applying any override, so presenting them as the default would tell
+           the reader the model uses a number it does not use. The controls stay
+           live — an override still wins over the table — they just stop
+           advertising a value that is never the effective one. */
         (P.cluster || []).forEach(i =>
-          push(`Once per cluster: ${i.label}`, itemFields('cluster.', i)));
+          push(`Once per cluster: ${i.label}${i.sizedByCluster ? ' — auto-sized from the published table by cluster size; a value here overrides the resolved row' : ''}`,
+               itemFields('cluster.', i)));
         (P.infraNode || []).forEach(i =>
           push(`Control plane: ${i.label}`, itemFields('infra.', i)));
         Object.entries(P.addons || {}).forEach(([k, a]) => {

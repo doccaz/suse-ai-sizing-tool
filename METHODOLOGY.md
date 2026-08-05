@@ -405,9 +405,9 @@ At 5 nodes / 100 VMs on 96-thread / 512 GB / 7.68 TB hosts:
 
 | Platform | CPU | RAM |
 |---|---|---|
-| Harvester | 84 thr | 77 GB |
+| Harvester | 87 thr | 76 GB |
 | OpenShift Virtualization | 52 thr | 236 GB |
-| vSphere + vSAN | 53 thr | 116 GB |
+| vSphere + vSAN | 53 thr | 115 GB |
 | Nutanix AHV | 51 thr | 209 GB |
 | Proxmox + Ceph | 15 thr | 102 GB |
 
@@ -807,8 +807,22 @@ selected**, since a hyperconverged storage service does not exist then.
 | Once per cluster | **vCenter Server Appliance**, sized from the published step table: Tiny 2 vCPU/14 GB (≤10 hosts, ≤100 VMs) → X-Large 24/58 (≤2000 hosts, ≤35000 VMs) | **Verified** | [VCSA hardware requirements](https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/8-0/vcenter-installation-and-setup/deploying-the-vcenter-server-appliance/vcenter-server-appliance-requirements/vcenter-server-appliance-hardware-requirements.html) |
 | Every node *(add-on, on by default)* | **vSAN** — 10% of host CPU, 4 GB base + 0.7 GB/TB raw | Estimate | [vSAN memory KB](https://knowledge.broadcom.com/external/article?legacyId=2113954), [sizing vSAN hosts](https://techdocs.broadcom.com/us/en/vmware-cis/vsan/vsan/8-0/planning-and-deployment/designing-and-sizing-a-virtual-san-cluster/designing-and-sizing-virtual-san-hosts.html) |
 
+**There is no published per-VM overhead table, and there has not been one since
+ESXi 5.1.** Current Broadcom documentation states that overhead "depends on a
+large number of factors, including the number of vCPUs and memory size, the
+number and types of devices, the execution mode that the monitor is using and
+the hardware version" and tells you to power the VM on and search `vmware.log`
+for **`VMMEM`**. The model's `1.005 × RAM + 100 MiB + 20 MiB/vCPU` is therefore
+an explicit **linear approximation with no vendor arithmetic behind it** — not a
+transcription of anything — and it is tiered *Estimate* accordingly. The honest
+improvement is not a better curve fit but a measurement: read `VMMEM` from a
+handful of representative VMs and override the coefficient.
+
 vCenter is modelled as a cluster service because it is normally a VM on the
-cluster it manages. The vSAN RAM figure derives from the documented formula
+cluster it manages. Its row is resolved from the published step table at
+sizing time, so the panel labels those controls as auto-sized: the numbers in
+the coefficient table are placeholders the engine replaces, and only an
+explicit override displaces the resolved row. The vSAN RAM figure derives from the documented formula
 `3 GB base + 500 MB/disk group + 7 MB per GB of cache tier`, with cache taken at
 the conventional ~10% of capacity — hence ~0.7 GB per TB of raw capacity. The
 published constants are from vSAN 6.x and the vendor notes they have grown, so
@@ -818,11 +832,25 @@ the base is set to 4 GB rather than 3.
 
 | Scope | Coefficient | Tier | Source |
 |---|---|---|---|
-| Every node | Controller VM (CVM) — 8 thr / 32 GB | Estimate | [AHV memory overcommit](https://www.nutanix.com/tech-center/blog/ahv-internals-memory-overcommit) |
+| Every node | Controller VM (CVM) **base allocation** — 8 thr / 32 GB | Estimate | [AHV memory overcommit](https://www.nutanix.com/tech-center/blog/ahv-internals-memory-overcommit) |
+| Every node *(add-on, off)* | **Redundancy Factor 3** — CVM floor rises ~8 GB | Estimate | CVM Specifications — Cluster Feature Based (portal login) |
+| Every node *(add-on, off)* | **Capacity-tier deduplication** — CVM floor rises ~8 GB | Estimate | CVM Specifications — Cluster Feature Based (portal login) |
 | Every node | AHV hypervisor — ~1% of host CPU / 2 GB | Estimate | [AHV CPU management](https://www.nutanix.com/tech-center/blog/understanding-cpu-resource-management-in-nutanix-ahv) |
 | Once per cluster | **Prism Central** (small, single VM) — 6 vCPU / 26 GB; an add-on models the 3-VM scale-out at 12 thr / 52 GB | Estimate | [Prism sizing](https://portal.nutanix.com/page/documents/details?targetId=Web-Console-Guide-Prism-v6_8:wc-cvm-memory-configuration-c.html) |
 
 AHV needs no separate storage-service term: the CVM **is** the storage service.
+
+**The CVM is not a constant.** Nutanix sizes it as *recommended platform memory
+plus memory for each enabled feature*, capped at **+16 GB** of feature
+additions. The model reproduces the shape of that rule — a base plus capped
+increments — rather than transcribing the table, because the authoritative
+"CVM Specifications — Cluster Feature Based" page sits behind a Nutanix portal
+login. The two increments modelled are the ones consistently attested outside
+the portal (RF3 and capacity-tier dedupe, ~8 GB each, together hitting the cap
+exactly). Both default to **off**: a plain RF2 cluster without dedupe genuinely
+does not pay them. Everything here stays **Estimate** — this is the platform
+with no accessible primary source and no measurement, and it will remain so
+until someone runs a capture against a real cluster.
 
 **Proxmox VE**
 

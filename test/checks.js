@@ -139,6 +139,66 @@ console.log('\n--- OpenShift Virtualization: Term A enters the per-node total --
   is('the three masters still use the per-control-plane-node scope', ocp3.infraCount === 3);
 }
 
+/* ---------------------------------------------------------------------
+   vSphere / AHV / Proxmox. These had NO test coverage at all: any
+   coefficient edit landed silently. These assertions pin the totals and
+   the platform-specific mechanisms, so a change has to be deliberate.
+   ------------------------------------------------------------------ */
+console.log('\n--- vSphere: vCenter is sized from the published table ---');
+{
+  const c = { hostThreads: 96, hostRam: 512, hostStorage: 7680, vmRam: 1600, vmRamRequested: 1600,
+              vmVcpu: 400, devices: 0 };
+  const small = computePlatformOverhead('vsphere', {}, { ...c, nodeCount: 5,  vmCount: 100 });
+  const large = computePlatformOverhead('vsphere', {}, { ...c, nodeCount: 500, vmCount: 9000 });
+  const row = (o) => o.lines.find(l => l.key === 'cluster.vcsa');
+  is('a 5-node/100-VM cluster resolves to Tiny', /Tiny/.test(row(small).label));
+  is('a 500-node/9000-VM cluster resolves to Large', /Large/.test(row(large).label));
+  is('  ... and the resolved row is bigger than the small one', row(large).ram > row(small).ram);
+  // The placeholder in the table must never be presented as the default.
+  const vcsaGroup = overrideSchema(HYPERVISORS.vsphere)
+    .find(g => /vCenter Server Appliance/.test(g.title));
+  is('the panel flags vCenter as auto-sized rather than advertising a default',
+     /auto-sized from the published table/.test(vcsaGroup.title));
+  // An override must still beat the resolved row, or the control is a lie.
+  const forced = computePlatformOverhead('vsphere', { overrides: { 'cluster.vcsa.ram': 99 } },
+                                         { ...c, nodeCount: 5, vmCount: 100 });
+  eq('an explicit override beats the table row', row(forced).ram, 99);
+}
+
+console.log('\n--- AHV: the CVM grows with enabled features ---');
+{
+  const c = { nodeCount: 5, hostThreads: 96, hostRam: 512, hostStorage: 7680, vmCount: 100,
+              vmRam: 1600, vmRamRequested: 1600, vmVcpu: 400, devices: 0 };
+  const base = computePlatformOverhead('ahv', {}, c);
+  const rf3  = computePlatformOverhead('ahv', { addons: { cvmRf3: true } }, c);
+  const both = computePlatformOverhead('ahv', { addons: { cvmRf3: true, cvmDedupe: true } }, c);
+  eq('RF3 adds 8 GB per node to the CVM', rf3.uniformRam - base.uniformRam, 8, 1e-9);
+  eq('RF3 + capacity dedupe add 16 GB, Nutanix’s stated cap', both.uniformRam - base.uniformRam, 16, 1e-9);
+  is('both feature toggles default to OFF (a plain RF2 cluster does not pay them)',
+     base.uniformRam === HYPERVISORS.ahv.perNode[0].ram + HYPERVISORS.ahv.perNode[1].ram);
+  is('AHV still refuses memory overcommit', base.noRamOvercommit === true);
+}
+
+console.log('\n--- Doc-sourced platforms: totals are pinned ---');
+{
+  // 5 nodes / 100 VMs on 96-thread / 512 GB / 7.68 TB hosts — the same
+  // configuration METHODOLOGY § 7a.1b tabulates. If these move, that table
+  // is stale and the change was probably not deliberate.
+  const c = { nodeCount: 5, hostThreads: 96, hostRam: 512, hostStorage: 7680, vmCount: 100,
+              vmRam: 1600, vmRamRequested: 1600, vmVcpu: 400, devices: 0 };
+  const total = (p) => {
+    const o = computePlatformOverhead(p, {}, c);
+    return { cpu: o.uniformCpu * 5 + o.lumpCpu, ram: o.uniformRam * 5 + o.lumpRam };
+  };
+  const want = { harvester: [87, 76], ocpvirt: [52, 236], vsphere: [53, 115],
+                 ahv: [51, 209], proxmox: [15, 102] };
+  for (const [p, [cpu, ram]] of Object.entries(want)) {
+    const t = total(p);
+    eq(`${p}: CPU at 5 nodes / 100 VMs`, Math.round(t.cpu), cpu, 1);
+    eq(`${p}: RAM at 5 nodes / 100 VMs`, Math.round(t.ram), ram, 1);
+  }
+}
+
 console.log('\n--- Overrides ---');
 const ovr = computePlatformOverhead('harvester', { overrides: { 'agent.cpu': 3 } }, ctx);
 eq('override replaces the table coefficient', ovr.uniformCpu - oh.uniformCpu, 3 - 1.03, 1e-9);
