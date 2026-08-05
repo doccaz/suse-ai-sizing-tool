@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.12.1";
+      const APP_VERSION = "2.12.2";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -906,6 +906,28 @@
         indicative: { label: 'Indicative only', cls: 'border-amber-500/40 text-amber-400 bg-amber-500/10',
                       blurb: 'A sketch from vendor documentation. Several significant categories are not modelled at all, so the total understates real overhead — do not compare it against a calibrated platform.' },
       };
+      /* Platform-specific PROSE. Sentences that name a component ("Longhorn",
+         "Rancher, CDI") were written when Harvester was the only modelled
+         platform and then rendered for every platform alike — telling a vSphere
+         user their storage is Longhorn. Anything a sentence names about the
+         platform comes from here, so adding a platform forces the words too.
+         `checks.js` asserts this stays in step with HYPERVISORS. */
+      const PLATFORM_WORDS = {
+        none:      { storage: 'host-local replicated storage',
+                     clusterSvc: 'cluster-wide services' },
+        harvester: { storage: 'SUSE Storage / Longhorn',
+                     clusterSvc: 'Rancher, CDI, the KubeVirt and Harvester operators, the apiserver/etcd leaders' },
+        ocpvirt:   { storage: 'OpenShift Data Foundation (Ceph)',
+                     clusterSvc: 'virt-api, virt-controller, CDI, HCO and the CNV operators' },
+        vsphere:   { storage: 'vSAN',
+                     clusterSvc: 'the vCenter Server Appliance' },
+        ahv:       { storage: 'the Nutanix CVM (RF replication)',
+                     clusterSvc: 'Prism Central' },
+        proxmox:   { storage: 'Ceph / ZFS',
+                     clusterSvc: 'corosync, pve-cluster and pvedaemon' },
+      };
+      const platformWords = (k) => PLATFORM_WORDS[hypervisorKey(k)] || PLATFORM_WORDS.none;
+
       /* The one declaration of which coefficients are editable, and under which
          override key. The panel renders from this and the tests assert every
          entry actually moves the numbers — the v2.8.0 panel drifted from the
@@ -3024,9 +3046,9 @@
                   {P.depthGaps && P.depthGaps.length > 0 && (
                     <p className="mt-1 text-gray-500">
                       <strong className="text-gray-400">Not modelled:</strong> {P.depthGaps.join('; ')}.
-                      Overhead shown for this platform is therefore a <strong className="text-gray-400">lower bound</strong>,
-                      and is not directly comparable with SUSE Virtualization (Harvester), whose model is calibrated
-                      against measurement.
+                      Treat this platform's overhead as <strong className="text-gray-400">less precise</strong> than
+                      SUSE Virtualization (Harvester), whose model is calibrated against measurement — the direction
+                      of the error is not uniform, so do not read the total as a floor.
                     </p>
                   )}
                 </div>
@@ -3093,9 +3115,11 @@
                     <div className="mt-3 space-y-3">
                       <p className="text-[11px] text-gray-500">
                         Every coefficient below is editable. Blank a field to fall back to the sourced default.
-                        <span className="text-suse-green"> Verified</span> = traced to vendor source code or a published
-                        worked example this model reproduces; <span className="text-amber-400">estimate</span> = vendor
-                        blog or community measurement. Full derivations in{' '}
+                        <span className="text-suse-green"> Verified</span> = traced to vendor source code, a shipped
+                        manifest, or a published worked example this model reproduces;
+                        <span className="text-sky-400"> measured</span> = read off a real cluster;
+                        <span className="text-amber-400"> estimate</span> = vendor
+                        blog, community figure or reasoned inference. Full derivations in{' '}
                         <a href={`${GITHUB_URL}/blob/main/METHODOLOGY.md`} target="_blank" rel="noopener noreferrer"
                            className="text-suse-green underline">METHODOLOGY.md</a>.
                       </p>
@@ -3181,8 +3205,8 @@
                   <p className="text-sm text-gray-300 mb-1"><strong className="text-suse-green">Platform overhead is not being counted.</strong></p>
                   <p className="text-xs text-gray-400 mb-3">
                     This configuration was saved before the hypervisor overhead model existed, so it is using the
-                    original raw-capacity maths — the management plane (RKE2, KubeVirt, Longhorn, monitoring) and
-                    per-VM hypervisor overhead are invisible. Selecting a platform will make the sizing more
+                    original raw-capacity maths — the management plane (hypervisor services, storage services and
+                    the cluster control plane) and per-VM hypervisor overhead are invisible. Selecting a platform will make the sizing more
                     realistic and will <strong className="text-gray-300">increase the recommended host count</strong>.
                   </p>
                   <div className="flex gap-2">
@@ -3263,7 +3287,7 @@
                     <Info size={16} className="mr-2 mt-0.5 flex-shrink-0" />
                     <div>{st.external
                       ? <>With an external array, redundancy is handled by the array — host-local replication and the per-host disk constraint are removed from the calculation. Plan <strong>{vs.externalStorageNeeded.toLocaleString('en-US')} GB</strong> usable on the {STORAGE_CONN[st.connection]}{vs.sites > 1 && <> across {vs.sites} sites</>}. Remember to provision the SAN/CSI data path on every host.</>
-                      : <>Host-local storage (SUSE Storage / Longhorn) is replicated <strong>{vs.repl}×</strong>, so raw demand is {vs.agg.storage.toLocaleString('en-US')} GB × {vs.repl} = {(vs.agg.storage * vs.repl).toLocaleString('en-US')} GB spread across hosts.</>}</div>
+                      : <>Host-local storage ({platformWords(vs.overhead.platform).storage}) is replicated <strong>{vs.repl}×</strong>, so raw demand is {vs.agg.storage.toLocaleString('en-US')} GB × {vs.repl} = {(vs.agg.storage * vs.repl).toLocaleString('en-US')} GB spread across hosts.</>}</div>
                   </div>
                 </Panel>
               </div>
@@ -3430,8 +3454,8 @@
                     <SectionLabel icon={Boxes}>Overhead by Cluster Size</SectionLabel>
                     <p className="text-[11px] text-gray-500 mb-2">
                       {vs.overhead.clusterRam > 0
-                        ? <>Cluster services (Rancher, CDI, the KubeVirt and Harvester operators, the
-                            apiserver/etcd leaders) are counted <strong>once</strong>, not per node — so overhead
+                        ? <>Cluster services ({platformWords(vs.overhead.platform).clusterSvc}) are
+                            counted <strong>once</strong>, not per node — so overhead
                             does not grow in proportion to the cluster.</>
                         : <>Control-plane overhead is fixed to the first {vs.overhead.infraCount} node(s), so it
                             does not scale — which is why overhead does not grow in proportion to the cluster.</>}

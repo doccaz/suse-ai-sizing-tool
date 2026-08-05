@@ -199,6 +199,26 @@ console.log('\n--- Doc-sourced platforms: totals are pinned ---');
   }
 }
 
+console.log('\n--- Platform prose stays in step with the model ---');
+{
+  const { PLATFORM_WORDS } = require('./harness.js');
+  // A sentence that names a component must name the RIGHT one: the panel used
+  // to tell every platform its storage was Longhorn and its cluster services
+  // were Rancher and CDI.
+  for (const k of Object.keys(HYPERVISORS)) {
+    is(`${k}: has UI prose for its storage and cluster services`,
+       !!(PLATFORM_WORDS[k] && PLATFORM_WORDS[k].storage && PLATFORM_WORDS[k].clusterSvc));
+  }
+  is('no platform is described with another platform’s storage engine',
+     !/Longhorn/.test(PLATFORM_WORDS.vsphere.storage + PLATFORM_WORDS.ahv.storage
+                      + PLATFORM_WORDS.proxmox.storage + PLATFORM_WORDS.ocpvirt.storage));
+  is('nor with another platform’s cluster services',
+     !/Rancher|Harvester/.test(PLATFORM_WORDS.vsphere.clusterSvc + PLATFORM_WORDS.ahv.clusterSvc
+                               + PLATFORM_WORDS.proxmox.clusterSvc + PLATFORM_WORDS.ocpvirt.clusterSvc));
+  is('every prose entry corresponds to a real platform',
+     Object.keys(PLATFORM_WORDS).every(k => k in HYPERVISORS));
+}
+
 console.log('\n--- Overrides ---');
 const ovr = computePlatformOverhead('harvester', { overrides: { 'agent.cpu': 3 } }, ctx);
 eq('override replaces the table coefficient', ovr.uniformCpu - oh.uniformCpu, 3 - 1.03, 1e-9);

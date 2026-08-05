@@ -157,6 +157,18 @@ const OUT = process.env.SCREENSHOT_DIR || require('os').tmpdir();
       is(`  "${p}" still describes requests and pods`,
          /platform pods/i.test(b2) && /scheduler requests/i.test(b2));
     }
+    /* Prose that names a component must name this platform's component. The
+       storage sentence and the cluster-services sentence both used to be
+       hardcoded to Harvester's stack whatever was selected. */
+    if (p !== 'harvester') {
+      is(`  "${p}" is not told its storage is Longhorn`,
+         !/SUSE Storage \/ Longhorn\) is replicated/i.test(b2));
+      is(`  "${p}" is not told its cluster services are Rancher and CDI`,
+         !/Cluster services \(Rancher, CDI/i.test(b2));
+    }
+    const svc = { vsphere: /vCenter Server Appliance\) are/i, ahv: /Prism Central\) are/i,
+                  proxmox: /corosync, pve-cluster/i, ocpvirt: /virt-api, virt-controller/i }[p];
+    if (svc) is(`  "${p}" names its own cluster services`, svc.test(b2));
   }
 
   // AHV rule visible.

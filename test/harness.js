@@ -41,6 +41,8 @@ const hvKubelet    = line1(/^\s*const harvesterKubeletCpu = /);
 const ocpCpuFn     = block(/^\s*const openshiftReservedCpu = /,             /^\s{6}\};\s*$/) || '';
 const ocpRamFn     = block(/^\s*const openshiftReservedRam = /,             /^\s{6}\};\s*$/) || '';
 const hypervisors  = block(/^\s*const HYPERVISORS = \{/,                    /^\s{6}\};\s*$/) || '';
+// UI prose that names platform components — asserted in step with HYPERVISORS.
+const platWords    = block(/^\s*const PLATFORM_WORDS = \{/,                 /^\s{6}\};\s*$/) || '';
 const hvKey        = block(/^\s*const hypervisorKey = /, /'none';\s*$/) || '';
 const schemaFn     = block(/^\s*const overrideSchema = \(P\) => \{/,      /^\s{6}\};\s*$/) || '';
 const numFn        = line1(/^\s*const num = \(x, fallback/);
@@ -65,6 +67,7 @@ ${hvKubelet}
 ${ocpCpuFn}
 ${ocpRamFn}
 ${hypervisors}
+${platWords}
 ${hvKey}
 ${schemaFn}
 ${numFn}
@@ -79,6 +82,7 @@ module.exports = { virtSummary,
   openshiftReservedRam: typeof openshiftReservedRam !== 'undefined' ? openshiftReservedRam : null,
   computePlatformOverhead: typeof computePlatformOverhead !== 'undefined' ? computePlatformOverhead : null,
   HYPERVISORS:         typeof HYPERVISORS         !== 'undefined' ? HYPERVISORS         : null,
+  PLATFORM_WORDS:      typeof PLATFORM_WORDS      !== 'undefined' ? PLATFORM_WORDS      : null,
   overrideSchema:      typeof overrideSchema      !== 'undefined' ? overrideSchema      : null };
 `;
 
