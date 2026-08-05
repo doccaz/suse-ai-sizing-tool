@@ -56,8 +56,9 @@ is('the storage-engine term is documented', has('136 MiB per replica'));
 is('the benchmark caveats are stated',
    has('One benchmark, one hardware configuration') && has('probably not homogeneous'));
 is('the Measured tier is defined', has('| **Measured** |'));
-is('add-ons are flagged as unvalidated by the benchmark',
-   has('benchmark ran with neither rancher-monitoring nor rancher-logging'));
+is('add-ons are documented as measured on the lab, not the benchmark',
+   hasFlat('benchmark ran with neither monitoring nor logging installed') &&
+   hasFlat('measured on the live v1.8.1 cluster'));
 is('the two Ranchers are disambiguated', has('Do not confuse the two Ranchers'));
 is('model completeness is documented', has('### 7a.1b Model completeness'));
 is('the KubeVirt formula is documented from source',
@@ -164,6 +165,18 @@ is('limitations repeat the cross-platform caveat',
   const nodeOnly = (n) => { const o = run(n, 50); return o.uniformRam * n + o.lumpRam; };
   const nr = (nodeOnly(5) / nodeOnly(3)).toFixed(2);
   is(`documented node-scaling ratio (${nr}x) match`, has(`**${nr}\u00d7 RAM**`));
+  is('the cluster-term recalibration is documented',
+     hasFlat('3.875 thr / 7.135 GB, counted once') && hasFlat('2 replicas'));
+  is('the single-node divergence is explained',
+     hasFlat('no longer reproduces the single-node benchmark, by design') || hasFlat('longer reproduces the single-node benchmark, by design'));
+  is('the direct decomposition is documented',
+     hasFlat('by observation') && hasFlat('a DaemonSet is per-node'));
+  is('the CNI caveat is documented',
+     hasFlat('CNI and version affect these figures') && hasFlat('kube-ovn'));
+  is('the residual and its cause are stated',
+     hasFlat('+5% on CPU and +12% on RAM') && hasFlat('it is tainted, so most DaemonSets skip it'));
+  is('add-on calibration is documented as measured from the lab',
+     hasFlat('20-50x too high') || hasFlat('20–50× too high'));
   is('the fixture is stated (no GPUs)', has('**no GPUs**'));
 }
 is('Rule 5 no longer says reserves default to 0 as the only lever',

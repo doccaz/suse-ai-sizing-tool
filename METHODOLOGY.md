@@ -549,22 +549,32 @@ per-node share `P` derived in § 7a.9.
 
 | Coefficient | Value | Tier | Source |
 |---|---|---|---|
-| etcd + apiserver / scheduler / controller-manager (leader share) | 0.55 thr / 1.19 GB | Measured | [Benchmark](https://gist.github.com/Vicente-Cheng/ae8d5ce743f94c0c9a333574813bc777) |
-| Harvester controllers, webhooks, UI, CDI, vm-import | 0.24 thr / 0.62 GB | Measured | [Benchmark](https://gist.github.com/Vicente-Cheng/ae8d5ce743f94c0c9a333574813bc777) |
-| Embedded Rancher (cattle / fleet / CAPI) | 0.20 thr / 0.46 GB | Measured | [Benchmark](https://gist.github.com/Vicente-Cheng/ae8d5ce743f94c0c9a333574813bc777) |
+| etcd + apiserver / scheduler / controller-manager (**HA replicas**) | 1.50 thr / 2.60 GB | Measured | Live v1.8.1 cluster (§ 7a.10) |
+| Harvester controllers, webhooks, UI, CDI, vm-import | 1.30 thr / 3.20 GB | Measured | Live v1.8.1 cluster (§ 7a.10) |
+| Embedded Rancher (cattle / fleet / CAPI) | 1.075 thr / 1.335 GB | Measured | Live v1.8.1 cluster (§ 7a.10) |
 | *Cluster services RSS beyond requests* — **physical only** | *6.09 GB* | Measured | [Benchmark](https://gist.github.com/Vicente-Cheng/ae8d5ce743f94c0c9a333574813bc777) |
 
-The three request rows sum to **0.99 thr / 2.27 GB, counted once** — the measured
-singleton share `S`.
+The three request rows sum to **3.875 thr / 7.135 GB, counted once** — measured
+directly on a 3-node v1.8.1 cluster by workload kind (§ 7a.10).
 
-**Add-ons** (toggleable; default state in brackets). **All Estimate**: the
-benchmark ran with neither rancher-monitoring nor rancher-logging installed, so
-nothing here is validated by it.
+> **Why this is much larger than the v1.7.1 benchmark's 2.27 GB.** That figure
+> came from a fit anchored on a *single-node* cluster, where none of the HA
+> replication exists: coredns, virt-api, virt-controller and the CNI operator
+> each run **2 replicas** once there is more than one node. v1.8.1 also adds CDI
+> and the kube-ovn stack. Since this tool sizes production HA clusters, the
+> multi-node measurement is the relevant one — and the model consequently no
+> longer reproduces the single-node benchmark, by design.
+
+**Add-ons** (toggleable; default state in brackets). The v1.7.1 benchmark ran
+with neither monitoring nor logging installed, so it validates neither. They are
+instead **measured on the live v1.8.1 cluster** (§ 7a.10), decomposed by workload
+kind: the DaemonSet component is per-node, the Deployments and StatefulSets are
+cluster-wide. The previous per-node RAM estimates were **20–50× too high**.
 
 | Add-on | Every node | Once per cluster | Tier | Source |
 |---|---|---|---|---|
-| rancher-monitoring **[on]** | 0.2 thr / 1.5 GB | 0.5 thr / 3 GB | Estimate | [Harvester requirements](https://docs.harvesterhci.io/v1.8/install/requirements/) |
-| rancher-logging **[off]** | 0.15 thr / 1 GB | 0.2 thr / 1 GB | Estimate | [Harvester requirements](https://docs.harvesterhci.io/v1.8/install/requirements/) |
+| rancher-monitoring **[on]** | 0.10 thr / 0.03 GB | 1.05 thr / 2.0 GB | **Measured** | Live v1.8.1 cluster (§ 7a.10) |
+| rancher-logging **[off]** | 0.05 thr / 0.05 GB | 0.22 thr / 0.41 GB | **Measured** | Live v1.8.1 cluster (§ 7a.10) |
 | Longhorn V2 data engine **[off]** | **+12% CPU** / 2 GB huge pages | — | Verified | `longhorn-manager types/setting.go:1134` (setting is data-engine specific), [Longhorn best practices](https://longhorn.io/docs/1.12.0/best-practices/) |
 | pcidevices + NVIDIA driver toolkit **[auto]** | 0.5 thr / 1.5 GB | — | Estimate | [Harvester requirements](https://docs.harvesterhci.io/v1.8/install/requirements/) |
 | Imported into an **external** Rancher **[on]** | 0.05 thr / 0.3 GB | 0.2 thr / 1 GB | Estimate | [Harvester requirements](https://docs.harvesterhci.io/v1.8/install/requirements/) |
@@ -816,23 +826,23 @@ overrides.
 | Term | 3 nodes / 50 VMs | 5 nodes / 100 VMs |
 |---|---|---|
 | A. kubelet reserve (1.42 thr/node) | 4.26 thr | 7.10 thr |
-| B. every-node pods, excl. A (13.48 thr / 5.13 GB per node) | 40.44 thr / 15.4 GB | 67.40 thr / 25.7 GB |
-| B′. cluster services (**counted once**) | 1.69 thr / 6.3 GB | 1.69 thr / 6.3 GB |
+| B. every-node pods, excl. A (13.38 thr / 3.67 GB per node) | 40.14 thr / 11.0 GB | 66.90 thr / 18.3 GB |
+| B′. cluster services (**counted once**) | 5.13 thr / 10.1 GB | 5.13 thr / 10.1 GB |
 | C. per-VM overhead | 4.00 thr / 23.7 GB | 8.00 thr / 47.5 GB |
 | D. per-device (no GPUs here) | — | — |
 | E. storage reserve (0% default) | — | — |
-| **Total (schedulable capacity removed)** | **50.39 thr / 45.4 GB** | **84.19 thr / 79.4 GB** |
+| **Total (schedulable capacity removed)** | **53.52 thr / 44.9 GB** | **87.12 thr / 75.9 GB** |
 | C′. storage engines — *physical RAM only* | *19.9 GB* | *39.8 GB* |
 
 Row B's per-node figure is Longhorn 11.35 (12% of allocatable = 12% × 94.58) +
-RKE2 agent 1.03 + virt 0.59 + Longhorn manager 0.26 + monitoring 0.2 + Rancher
-agent 0.05 = 13.48 thr. Add row A's 1.42 for the 14.90 thr/node the tool reports
+RKE2 agent 1.03 + virt 0.59 + Longhorn manager 0.26 + monitoring 0.10 + Rancher
+agent 0.05 = 13.38 thr. Add row A's 1.42 for the 14.80 thr/node the tool reports
 as "per node (every host)".
 
 **Where the non-linearity now lives.** Row B′ is flat: identical at 3 nodes and
-at 5. Holding VM count fixed and going 3 → 5 nodes costs **1.23× RAM**, not
+at 5. Holding VM count fixed and going 3 → 5 nodes costs **1.16× RAM**, not
 1.667× — that is the singleton effect, and `test/e2e.js` asserts it. The
-3n/50vm → 5n/100vm columns above grow faster (1.67× CPU, 1.75× RAM) because
+3n/50vm → 5n/100vm columns above grow faster (1.63× CPU, 1.69× RAM) because
 they *also* double the VM count, and the per-VM terms scale with VMs. Two
 different effects; do not read the column ratio as the node-scaling ratio.
 
@@ -1001,6 +1011,39 @@ The lab did not merely confirm the model — it falsified two details of it:
 
 Both are fixed, and `test/benchmark.js` asserts the corrected behaviour against
 the live figures.
+
+#### The core terms, decomposed directly
+
+Because every workload declares its kind, the per-node and cluster-wide shares
+can be separated **by observation** rather than by the two-point algebraic fit
+§ 7a.9 relied on: a DaemonSet is per-node, a Deployment or StatefulSet is
+cluster-wide. Excluding the Longhorn instance-manager, which is modelled
+separately:
+
+| | Model before | Live v1.8.1 | |
+|---|---|---|---|
+| per compute node | 1.88 thr / **3.34 GB** | 2.00 thr / **3.339 GB** | agrees to 0.03% |
+| cluster-wide singletons | 0.99 thr / 2.27 GB | **3.875 thr / 7.135 GB** | 3–4× larger |
+
+The per-node term is confirmed by two independent clusters. The cluster term was
+**substantially under-modelled**, and the model now uses the measured multi-node
+figures. See the note in § 7a.4 for why the single-node fit was so much smaller.
+
+After this recalibration, the model predicts this cluster's total platform
+requests to **+5% on CPU and +12% on RAM** (previously −19% / +23%). The residual
+is the witness node: it is tainted, so most DaemonSets skip it, while the model
+charges every node the same per-node cost.
+
+#### CNI and version affect these figures
+
+This lab runs **kube-ovn**; the v1.7.1 benchmark almost certainly ran canal,
+which is lighter. Together with the version difference, that is the main reason
+the two clusters disagree on the cluster term. The shipped coefficients reflect
+**v1.8.1 with kube-ovn**. A canal-based cluster will cost less, and the model
+will over-predict it — by roughly 40% on cluster RAM, judging by the v1.7.1
+figures. This is not modelled as a toggle because only one measurement per CNI
+exists, and a selector would imply precision that is not there. Adjust the
+`cluster.*` coefficients if your CNI differs.
 
 #### What this does *not* validate
 

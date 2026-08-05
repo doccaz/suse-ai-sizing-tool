@@ -88,7 +88,7 @@ console.log('\n--- Overrides ---');
 const ovr = computePlatformOverhead('harvester', { overrides: { 'agent.cpu': 3 } }, ctx);
 eq('override replaces the table coefficient', ovr.uniformCpu - oh.uniformCpu, 3 - 1.03, 1e-9);
 const ovrC = computePlatformOverhead('harvester', { overrides: { 'cluster.cp.ram': 5 } }, ctx);
-eq('cluster-scope coefficients are overridable', ovrC.clusterRam - oh.clusterRam, 5 - 1.19, 1e-9);
+eq('cluster-scope coefficients are overridable', ovrC.clusterRam - oh.clusterRam, 5 - 2.60, 1e-9);
 // AdditionalGuestMemoryOverheadRatio is a cluster setting (range 1.0-10.0).
 const ovrR = computePlatformOverhead('harvester', { overrides: { 'perVm.overheadRatio': 3 } }, ctx);
 eq('the guest-memory overhead ratio is overridable', ovrR.perVmRam / oh.perVmRam, 3 / 1.5, 1e-9);

@@ -40,45 +40,41 @@ const totalCpu = (oh, n) => oh.uniformCpu * n + oh.lumpCpu;
 const totalRam = (oh, n) => oh.uniformRam * n + oh.lumpRam;
 const requestCpu = (oh, n) => totalCpu(oh, n) - kubeletOf(oh, n);
 
-console.log('--- Phase 1 idle: scheduler requests ---');
-// Single-node: "cpu 8488m (18%)", "memory 5745 Mi (4%)"
-near('1-node CPU requests', requestCpu(at(1), 1) * 1000, 8488, 1, 'm');
-near('1-node memory requests', totalRam(at(1), 1) * 1024, 5745, 1, ' MiB');
-// 3-node: 5745 + 3767 + 3075 = 12587 Mi
-near('3-node memory requests', totalRam(at(3), 3) * 1024, 12587, 1, ' MiB');
+/* The v1.7.1 benchmark measured a SINGLE-node cluster and a 3-node cluster.
+   Since v2.10.0 the model targets multi-node HA clusters and is calibrated on
+   the v1.8.1 lab instead, so it deliberately NO LONGER reproduces the v1.7.1
+   totals. Two reasons, both documented in METHODOLOGY.md 7a.10:
 
-console.log('\n--- The structural finding: singletons do not replicate ---');
-const r = totalRam(at(3), 3) / totalRam(at(1), 1);
-near('3-node : 1-node memory ratio', r, 12587 / 5745, 2);
-is('ratio is NOT the 3.00x of the v2.5.0 model', Math.abs(r - 3) > 0.5);
-// Guard the exact bug this suite exists for: the cluster lump must be flat.
-const lumps = [1, 3, 5, 7].map(n => at(n).clusterRam);
-is(`cluster RAM is flat across 1/3/5/7 nodes (${lumps[0].toFixed(3)} GiB)`,
-   lumps.every(x => Math.abs(x - lumps[0]) < 1e-9));
-const lumpsCpu = [1, 3, 5, 7].map(n => at(n).clusterCpu);
-is('cluster CPU is flat across 1/3/5/7 nodes', lumpsCpu.every(x => Math.abs(x - lumpsCpu[0]) < 1e-9));
+     - HA replication. coredns, virt-api, virt-controller and the CNI operator
+       each run 2 replicas once there is more than one node. A single-node
+       cluster has none of that, so its singleton cost is far lower.
+     - Version and CNI. v1.8.1 adds CDI and the kube-ovn stack; the v1.7.1
+       cluster almost certainly ran canal, which is lighter.
 
-console.log('\n--- No singleton double-count ---');
-/* The measured 2870m (8488 − Longhorn) is `Pc + Sc`, not `Pc`. Charging it per
-   node AND as a cluster lump would double-count Sc — the same error class as the
-   min(3,N) bug. At N=1 the terms must sum to exactly the measured total. */
-const oh1 = at(1);
-const alloc = HOST_THREADS - harvesterKubeletCpu(HOST_THREADS);
-const longhorn = 0.12 * alloc;
-near('Longhorn 12% is of ALLOCATABLE, not capacity',
-     oh1.lines.find(l => l.key === 'lhim').cpu * 1000, longhorn * 1000, 0.01, 'm');
-const perNodeNoLh = oh1.uniformCpu - longhorn - harvesterKubeletCpu(HOST_THREADS);
-near('per-node CPU Pc (singleton excluded)', perNodeNoLh * 1000, 1879, 2, 'm');
-near('cluster CPU Sc', oh1.clusterCpu * 1000, 991, 2, 'm');
-near('Pc + Sc reproduces the single-node remainder', (perNodeNoLh + oh1.clusterCpu) * 1000, 2870, 1, 'm');
-// The memory decomposition, which fits the measured node skew exactly.
-near('per-node memory P', oh1.uniformRam * 1024, 3421, 1, ' MiB');
-near('cluster memory S', oh1.clusterRam * 1024, 2324, 1, ' MiB');
-is('P + S = the single-node measurement',
-   Math.abs((oh1.uniformRam + oh1.clusterRam) * 1024 - 5745) < 10);
-// At 3 nodes, S must appear once: 3P + S, never 3P + 3S.
-near('3 nodes = 3P + S (not 3P + 3S)', totalRam(at(3), 3) * 1024,
-     3 * 3421 + 2324, 1, ' MiB');
+   What survives is the per-node term, which the two clusters agree on
+   independently - and that agreement is worth asserting. */
+console.log('--- v1.7.1 benchmark: what still holds ---');
+{
+  const P_v171 = 3421;    // MiB per node, from the benchmark's two-point fit
+  const P_lab  = 3339;    // MiB per node, measured directly on the v1.8.1 lab
+  near('two clusters agree on the per-node term', P_lab, P_v171, 3, ' MiB');
+  near('model per-node RAM matches both', at(3).uniformRam * 1024, P_v171, 3, ' MiB');
+}
+
+console.log('\n--- ... and what deliberately no longer matches ---');
+{
+  /* Recorded so the divergence is visible and intentional rather than silent
+     drift. If a future change makes the model reproduce the single-node figure
+     again, that is a regression against the multi-node calibration. */
+  const oneNode = at(1).uniformRam * 1024 + at(1).clusterRam * 1024;
+  is(`model exceeds the v1.7.1 single-node total (${oneNode.toFixed(0)} vs 5745 MiB) - HA replicas`,
+     oneNode > 5745 * 1.4);
+  const threeNode = at(3).uniformRam * 3 * 1024 + at(3).clusterRam * 1024;
+  is(`model exceeds the v1.7.1 three-node total (${threeNode.toFixed(0)} vs 12587 MiB) - v1.8.1 + kube-ovn`,
+     threeNode > 12587);
+  is('the divergence is in the cluster term, not the per-node term',
+     Math.abs(at(3).uniformRam * 1024 - 3421) < 120);
+}
 
 console.log('\n--- Per-VM overhead: KubeVirt formula vs the measurement ---');
 /* This is the strongest evidence in the model: a formula taken from vendor
@@ -155,12 +151,19 @@ console.log('\n--- Provenance ---');
 const tiers = at(3, 10).lines.map(l => l.tier);
 is('the measured tier is in use', tiers.includes('measured'));
 is('every line still carries a source', at(3, 10).lines.every(l => l.src && l.src.length > 10));
-is('measured lines cite the benchmark',
-   at(3, 10).lines.filter(l => l.tier === 'measured').every(l => /gist\.github\.com/.test(l.src)));
-is('add-on coefficients stay Estimate (the benchmark ran without them)',
+// Measured coefficients now come from two sources: the v1.7.1 gist benchmark
+// and the v1.8.1 live lab. Each must cite one of them, not neither.
+is('every measured line cites a measurement source',
+   at(3, 10).lines.filter(l => l.tier === 'measured')
+     .every(l => /gist\.github\.com|Harvester v1\.8\.1 cluster/.test(l.src)));
+/* The v1.7.1 benchmark ran without monitoring or logging, so it validates
+   neither. Those coefficients are now Measured from the v1.8.1 lab instead —
+   they must cite that, not this benchmark. */
+is('add-on coefficients are Measured from the lab, not this benchmark',
    computePlatformOverhead('harvester', { addons: { monitoring: true } }, {
      nodeCount: 3, hostThreads: 48, hostRam: 128, vmCount: 0, vmRam: 0, vmVcpu: 0, devices: 0 })
-     .lines.filter(l => /addon\.monitoring/.test(l.key)).every(l => l.tier === 'estimate'));
+     .lines.filter(l => /addon\.monitoring/.test(l.key))
+     .every(l => l.tier === 'measured' && /Harvester v1\.8\.1/.test(l.src)));
 
 /* ===================================================================
    Second, independent calibration point: a live Harvester v1.8.1 lab
@@ -233,6 +236,52 @@ console.log('\n=== Live lab: Harvester v1.8.1 (independent of the v1.7.1 benchma
       devices: 2, gpuVms: 1, replicas: 3, externalStorage: false }).perVmRam * 1024;
     near('  a 2-device VM still pays only 1 GiB (matches the live measurement)',
          two, gpu.overheadMiB, 0.01, ' MiB');
+  }
+
+  console.log('\n--- Core terms, decomposed by workload kind on the live cluster ---');
+  {
+    const bare = computePlatformOverhead('harvester',
+      { addons: { monitoring: false, logging: false, gpuStack: false, rancher: false, lhV2: false } },
+      { nodeCount: 3, hostThreads: 24, hostRam: 92, hostStorage: 2000, vmCount: 0, vmRam: 0,
+        vmRamRequested: 0, vmVcpu: 0, devices: 0, gpuVms: 0, replicas: 3, externalStorage: true });
+    /* Deployments and StatefulSets in kube-system / harvester-system /
+       longhorn-system, excluding the Longhorn instance-manager which is
+       modelled separately. Measured on the 3-node v1.8.1 cluster. */
+    near('  cluster-wide singletons, CPU', bare.clusterCpu, 3.875, 1, ' thr');
+    near('  cluster-wide singletons, RAM', bare.clusterRam, 7.135, 1, ' GiB');
+    /* Per COMPUTE node: one pod of each DaemonSet/static workload. The model's
+       figure includes the kubelet reserve and Longhorn, which the lab counts
+       separately, so compare the remainder. */
+    const perNodeCore = bare.uniformRam;   // physical lines are excluded from uniformRam
+    near('  per compute node, RAM', perNodeCore, 3.339, 2, ' GiB');
+    is('  the cluster term does not scale with node count',
+       [1, 3, 7].every(n => Math.abs(computePlatformOverhead('harvester',
+         { addons: { monitoring: false, logging: false, gpuStack: false, rancher: false, lhV2: false } },
+         { nodeCount: n, hostThreads: 24, hostRam: 92, hostStorage: 2000, vmCount: 0, vmRam: 0,
+           vmRamRequested: 0, vmVcpu: 0, devices: 0, gpuVms: 0, replicas: 3, externalStorage: true }
+         ).clusterRam - bare.clusterRam) < 1e-9));
+  }
+
+  console.log('\n--- Add-ons, decomposed by workload kind on the live cluster ---');
+  {
+    const withAddons = (a) => computePlatformOverhead('harvester',
+      { addons: { monitoring: false, logging: false, gpuStack: false, rancher: false, lhV2: false, ...a } },
+      { nodeCount: 3, hostThreads: 24, hostRam: 92, hostStorage: 2000, vmCount: 0, vmRam: 0,
+        vmRamRequested: 0, vmVcpu: 0, devices: 0, gpuVms: 0, replicas: 3, externalStorage: true });
+    const base = withAddons({});
+    const mon = withAddons({ monitoring: true }), log = withAddons({ logging: true });
+    // node-exporter DaemonSet on 3 nodes = 0.300 thr / 0.088 GiB total.
+    near('  monitoring per node (node-exporter DaemonSet)',
+         (mon.uniformRam - base.uniformRam) * 3, 0.088, 5, ' GiB');
+    // Prometheus + Grafana + Alertmanager + operator + adapter + kube-state-metrics.
+    near('  monitoring once per cluster', mon.clusterRam - base.clusterRam, 2.002, 2, ' GiB');
+    near('  monitoring cluster CPU', mon.clusterCpu - base.clusterCpu, 1.050, 2, ' thr');
+    // fluentbit DaemonSet on 3 nodes = 0.150 thr / 0.146 GiB total.
+    near('  logging per node (fluentbit DaemonSet)',
+         (log.uniformRam - base.uniformRam) * 3, 0.146, 5, ' GiB');
+    near('  logging once per cluster', log.clusterRam - base.clusterRam, 0.410, 2, ' GiB');
+    is('  per-node RAM is no longer 20-50x the measurement',
+       (mon.uniformRam - base.uniformRam) < 0.1 && (log.uniformRam - base.uniformRam) < 0.1);
   }
 
   console.log('\n--- Page tables follow the memory REQUEST, not the guest size ---');

@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.9.0";
+      const APP_VERSION = "2.10.0";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -478,6 +478,9 @@
         prismCentral: 'https://portal.nutanix.com/page/documents/details?targetId=Web-Console-Guide-Prism-v6_8:wc-cvm-memory-configuration-c.html',
         kvOverhead: 'kubevirt/kubevirt pkg/virt-controller/services/template.go:115-119 + renderresources.go GetMemoryOverhead()',
         hvRatio:    'harvester/harvester pkg/settings/settings_helper.go (AdditionalGuestMemoryOverheadRatioDefault = "1.5")',
+        // Read-only measurements from a live Harvester v1.8.1 cluster; see
+        // test/measurements/ and METHODOLOGY.md § 7a.10.
+        lab:        'Live Harvester v1.8.1 cluster, measured (test/measurements/lab-harvester-v1.8.1.json)',
       };
 
       /* Term A. Harvester derives its kubelet CPU reservation from the GKE
@@ -554,13 +557,21 @@
           // cost: Rancher, CDI, the KubeVirt/Harvester operators and the
           // apiserver/etcd/ingress leader skew all land once. Measured
           // S = 2324 MiB / Sc = 991m.
+          /* Measured on a live 3-node v1.8.1 cluster by workload kind
+             (Deployment/StatefulSet => cluster-wide), totalling 3.875 thr /
+             7.135 GiB. The earlier figures came from the v1.7.1 benchmark's
+             SINGLE-node cluster, where none of the HA replication exists:
+             coredns, virt-api, virt-controller and the kube-ovn operator each
+             run 2 replicas once there is more than one node, and v1.8.1 also
+             adds CDI and the kube-ovn stack. Since this tool sizes production
+             HA clusters, the multi-node measurement is the relevant one. */
           cluster: [
-            { key: 'cp',    label: 'etcd + apiserver / scheduler / controller-manager (leader share)', cpu: 0.55, ram: 1.19,
-              tier: 'measured', src: `${OVERHEAD_SRC.benchmark}; ${OVERHEAD_SRC.hvReqs}` },
-            { key: 'hvctl', label: 'Harvester controllers, webhooks, UI, CDI, vm-import', cpu: 0.24, ram: 0.62,
-              tier: 'measured', src: `${OVERHEAD_SRC.benchmark}; ${OVERHEAD_SRC.hvReqs}` },
-            { key: 'rancher', label: 'Embedded Rancher (cattle / fleet / CAPI)', cpu: 0.20, ram: 0.46,
-              tier: 'measured', src: OVERHEAD_SRC.benchmark },
+            { key: 'cp',    label: 'etcd + apiserver / scheduler / controller-manager (HA replicas)', cpu: 1.50, ram: 2.60,
+              tier: 'measured', src: OVERHEAD_SRC.lab },
+            { key: 'hvctl', label: 'Harvester controllers, webhooks, UI, CDI, vm-import', cpu: 1.30, ram: 3.20,
+              tier: 'measured', src: OVERHEAD_SRC.lab },
+            { key: 'rancher', label: 'Embedded Rancher (cattle / fleet / CAPI)', cpu: 1.075, ram: 1.335,
+              tier: 'measured', src: OVERHEAD_SRC.lab },
             // PHYSICAL counterpart of the singleton services — see physNode above.
             { key: 'physCluster', label: 'Cluster services RSS beyond their requests', basis: 'physical', cpu: 0, ram: 6.09,
               tier: 'measured', src: OVERHEAD_SRC.benchmark },
@@ -596,12 +607,22 @@
              `cluster` scope for the same reason the core ones did — Prometheus,
              Grafana and the Fluentd aggregator are singletons. */
           addons: {
+            /* Measured on a live cluster by workload kind, which separates
+               per-node from cluster-wide directly rather than by inference:
+                 monitoring  DaemonSet node-exporter           -> per node
+                             Prometheus, Grafana, Alertmanager,
+                             operator, kube-state-metrics,
+                             prometheus-adapter                -> once
+                 logging     DaemonSet fluentbit               -> per node
+                             root/kube-audit fluentd, event
+                             tailer, logging operator          -> once
+               The previous per-node RAM figures were 20-50x too high. */
             monitoring: { label: 'rancher-monitoring (Prometheus / Grafana)', on: true,
-                          perNode: { cpu: 0.2, ram: 1.5 }, cluster: { cpu: 0.5, ram: 3 },
-                          tier: 'estimate', src: OVERHEAD_SRC.hvReqs },
+                          perNode: { cpu: 0.10, ram: 0.03 }, cluster: { cpu: 1.05, ram: 2.0 },
+                          tier: 'measured', src: OVERHEAD_SRC.lab },
             logging:    { label: 'rancher-logging (Fluentd / Fluent Bit)', on: false,
-                          perNode: { cpu: 0.15, ram: 1 }, cluster: { cpu: 0.2, ram: 1 },
-                          tier: 'estimate', src: OVERHEAD_SRC.hvReqs },
+                          perNode: { cpu: 0.05, ram: 0.05 }, cluster: { cpu: 0.22, ram: 0.41 },
+                          tier: 'measured', src: OVERHEAD_SRC.lab },
             lhV2:       { label: 'Longhorn V2 data engine (SPDK + 2 GiB huge pages)', on: false,
                           perNode: { cpuPct: 0.12, ram: 2 },
                           tier: 'verified', src: `${OVERHEAD_SRC.lhSetting}; ${OVERHEAD_SRC.lhBest}` },

@@ -68,7 +68,7 @@ const { harvesterKubeletCpu: kube } = require('./harness.js');
 const h1 = poolH.hostCaps.find(h => h.id === 'h1');   // 96 threads (primary)
 const h2 = poolH.hostCaps.find(h => h.id === 'h2');   // 64 threads
 // agent + virt + lhmgr + monitoring + gpuStack (auto-on, fixture has GPUs) + rancher
-const flat = 1.03 + 0.59 + 0.26 + 0.2 + 0.5 + 0.05;
+const flat = 1.03 + 0.59 + 0.26 + 0.10 + 0.5 + 0.05;   // monitoring is 0.10 since v2.10.0
 // Longhorn takes 12% of ALLOCATABLE (capacity minus the kubelet reserve).
 const expect = (thr) => 0.12 * (thr - kube(thr)) + flat + kube(thr);
 is(`h1 (96 thr) overhead = ${expect(96).toFixed(2)}`, Math.abs(h1.ohCpu - expect(96)) < 1e-9);
