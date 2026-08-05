@@ -73,7 +73,16 @@ is('monitoring is on by default and can be turned off', noMon.uniformCpu < oh.un
 const gpuCtx = { ...ctx, devices: 8 };
 const gpuOh = computePlatformOverhead('harvester', {}, gpuCtx);
 is('GPU stack auto-enables when devices are present', !!gpuOh.lines.find(l => l.key === 'addon.gpuStack'));
-eq('per-device RAM = 1 GiB x 8', gpuOh.lines.find(l => l.key === 'perDevice').ram, 8);
+/* VFIO is now inside the per-VM term and charged per passthrough VM, not per
+   device — verified against a live 2-device VM that paid exactly 1 GiB. */
+is('no separate per-device line on KubeVirt platforms',
+   !gpuOh.lines.some(l => l.key === 'perDevice'));
+{
+  const vf = (gpuVms) => computePlatformOverhead('harvester', {}, { ...gpuCtx, vmCount: 4,
+    vmRam: 64, vmRamRequested: 64, vmVcpu: 16, devices: 8, gpuVms }).perVmRam;
+  eq('VFIO adds 1 GiB x 1.5 per passthrough VM', vf(2) - vf(0), 2 * 1.5, 1e-9);
+  eq('  ... and does not scale with device count', vf(1) - vf(0), 1.5, 1e-9);
+}
 
 console.log('\n--- Overrides ---');
 const ovr = computePlatformOverhead('harvester', { overrides: { 'agent.cpu': 3 } }, ctx);
@@ -95,9 +104,12 @@ console.log('\n--- KubeVirt formula: Harvester vs OpenShift differ only by the r
      ['harvester', 'ocpvirt'].every(p => HYPERVISORS[p].perVm.tier === 'verified'));
   is('both cite the KubeVirt source',
      ['harvester', 'ocpvirt'].every(p => /kubevirt\/kubevirt/.test(HYPERVISORS[p].perVm.src)));
-  is('VFIO per-device is 1 GiB and source-verified',
-     ['harvester', 'ocpvirt'].every(p => HYPERVISORS[p].perDevice.ramGiB === 1 &&
-        HYPERVISORS[p].perDevice.tier === 'verified'));
+  is('VFIO is 1 GiB per passthrough VM, inside the per-VM term',
+     ['harvester', 'ocpvirt'].every(p => HYPERVISORS[p].perVm.vfioGiB === 1 &&
+        HYPERVISORS[p].perDevice === null));
+  is('non-KubeVirt platforms keep a per-device term',
+     ['vsphere', 'ahv', 'proxmox'].every(p => HYPERVISORS[p].perDevice &&
+        HYPERVISORS[p].perDevice.ramGiB === 1));
   // Non-KubeVirt platforms keep the simpler published form.
   is('vSphere/AHV/Proxmox still use the factor form',
      ['vsphere', 'ahv', 'proxmox'].every(p => HYPERVISORS[p].perVm.kind !== 'kubevirt'));

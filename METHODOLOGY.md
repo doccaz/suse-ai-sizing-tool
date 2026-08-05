@@ -598,7 +598,7 @@ fixed        = 25 MiB virt-launcher-monitor
              +  25 MiB virtlogd
              +  40 MiB virtqemud
              +  30 MiB qemu                        = 220 MiB
-page tables  = guest RAM / 512
+page tables  = memory REQUEST / 512      (not the guest size — see below)
 per vCPU     = 8 MiB
 IOThread     = 8 MiB
 graphics     = 32 MiB   (auto-attached by default)
@@ -609,6 +609,12 @@ overhead     = (fixed + page tables + per-vCPU + IOThread + graphics)
 
 Constants from `kubevirt/kubevirt pkg/virt-controller/services/template.go:115-119`,
 **verified identical in v1.6.3** (the release the benchmark ran) **and in `main`**.
+
+> **Page tables follow `spec.domain.resources.requests.memory`, not the guest
+> size.** With memory overcommit active — Harvester ships 150% — the request is
+> the guest size divided by that ratio, so the page-table term is smaller than a
+> naive reading suggests. Using the guest size instead overstates a 32 GiB guest's
+> overhead by ~20 MiB. The model uses the request.
 
 The ratio is a cluster setting. **Harvester defaults it to 1.5**
 (`harvester/harvester pkg/settings/settings_helper.go`,
@@ -653,9 +659,11 @@ to your fleet:
 | Dedicated CPU, or Guaranteed QoS | +100 MiB |
 | DownwardMetrics disk | +1 MiB |
 
-VFIO/GPU passthrough (+1 GiB per device) *is* modelled — as Term D
-([§ 7a.6](#7a6-terms-d-and-e-and-the-other-platforms)), since the tool knows the
-device count.
+**VFIO/GPU passthrough is modelled inside this term, at +1 GiB per passthrough
+*VM*** — not per device. KubeVirt's branch is `if HasVFIO(vmi)`, a boolean, so a
+guest with four GPUs pays the same 1 GiB as a guest with one. Confirmed on a live
+VM with two host devices, which paid exactly 1 GiB × the 1.5 ratio = 1536 MiB.
+The non-KubeVirt platforms keep a genuinely per-device term (Term D).
 
 #### The other platforms
 
@@ -936,6 +944,82 @@ predicts **48%** physical consumption against the benchmark's reported ~49%.
 `test/benchmark.js` asserts that the shipped model reproduces every headline
 figure in this section, so a future coefficient change that breaks the
 calibration fails the build.
+
+### 7a.10 Validation against a live cluster
+
+A second, independent check against a running **Harvester v1.8.1** lab —
+a different version, a different topology (2 compute + 1 witness) and different
+host sizes from the v1.7.1 benchmark. All measurements were read-only
+(`kubectl get`/`describe`, `/proc`, kubelet config); nothing was modified.
+
+**Term A — kubelet reserve, against the real kubelet configuration.** The model
+reproduces `/etc/rancher/rke2/config.yaml.d/99-z00-harvester-reserved-resources.yaml`
+exactly, at three different core counts including the boundary case at exactly
+4 cores:
+
+| Node | Threads | Model (system / kube) | On the host |
+|---|---|---|---|
+| harv01lab | 24 | 424m / 636m | **424m / 636m** |
+| harv02lab | 32 | 440m / 660m | **440m / 660m** |
+| harvlab-witness | 4 | 384m / 576m | **384m / 576m** |
+
+`capacity − reserve = allocatable` also matches to the millicore on all three,
+and every node reports `allocatable.pods = 200`, confirming the `maxPods > 110`
+tier that adds 400 mCPU.
+
+**No kubelet memory reservation.** `capacity.memory == allocatable.memory` on all
+three nodes — previously an inference from the upgrade script, now observed.
+
+**Longhorn is 12% of allocatable, and CPU-only.** `longhorn-system` requests
+2.753 threads on the 24-thread node (0.12 × 22.94 allocatable) and 3.708 on the
+32-thread node (0.12 × 30.90) — exact on both, and *not* 12% of capacity. Its
+memory requests are **zero**, confirming that instance-manager memory is
+consumption rather than a request, which is why the model tracks it on the
+physical basis.
+
+**Settings.** `additional-guest-memory-overhead-ratio` default **1.5**,
+`guaranteed-instance-manager-cpu` **{"v1":"12","v2":"12"}**,
+`storage-reserved-percentage-for-default-disk` **0** — every value the model
+hard-codes, confirmed on a newer release than the one they were read from.
+
+**Term C — against 10 live virt-launcher pods.** Guests from 2 to 8 vCPU and
+5.3 to 21.3 GiB of requested memory, one with GPU passthrough. Worst error
+**0.0004%**; most rows match to the byte.
+
+#### Two corrections it produced
+
+The lab did not merely confirm the model — it falsified two details of it:
+
+1. **VFIO was charged per device; it is per VM.** The `gpu-node` guest has *two*
+   passthrough host devices and pays exactly **1 GiB** (× 1.5 = 1536 MiB), because
+   KubeVirt's branch is `if HasVFIO(vmi)` — a boolean. The model previously
+   multiplied by device count, over-stating any guest with more than one device.
+2. **Page tables were computed on the guest size; they use the memory request.**
+   The `rancher-host` guests are 32 GiB with 150% memory overcommit, so their
+   request is 21.33 GiB and their overhead is 550 MiB, not the 570 MiB the guest
+   size would imply.
+
+Both are fixed, and `test/benchmark.js` asserts the corrected behaviour against
+the live figures.
+
+#### What this does *not* validate
+
+The lab carries third-party workloads in namespaces that are not part of a
+stock Harvester installation (`forklift`, `cloudcasa-io`, `techday`,
+`cloudflare`, `cattle-turtles-system`) — confirmed as such by the cluster's
+owner. Those were **excluded** from the platform comparison below; only
+`kube-system`, `harvester-system`, `longhorn-system` and the
+`cattle-monitoring`/`cattle-logging` add-ons were counted.
+
+Even so, this is **not** a clean second data point for the per-node/singleton
+(P/S) decomposition of § 7a.9: the witness topology differs from the
+3-identical-node benchmark, and a witness node runs neither Longhorn nor the
+virt stack. Comparing platform-only requests, the model under-predicts CPU by
+~19% and over-predicts RAM by ~23% on this cluster — driven mostly by the
+monitoring add-on, whose coefficients remain **Estimate** and which this cluster
+runs more of than the model assumes. Those coefficients are still the weakest
+part of the model, and a stock installation measured across varying node counts
+remains the most valuable thing that could be added.
 
 ---
 

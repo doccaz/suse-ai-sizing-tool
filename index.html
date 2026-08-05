@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.8.0";
+      const APP_VERSION = "2.9.0";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -577,7 +577,7 @@
              cpuMilli is the launcher CPU beyond vCPU/overcommit (205m measured
              per VM, less 2000m/16 at Harvester's default 1600% ratio). */
           perVm: { kind: 'kubevirt', fixedMiB: 220, perVcpuMiB: 8, ioThreadMiB: 8, graphicsMiB: 32,
-                   pagetableDivisor: 512, overheadRatio: 1.5, cpuMilli: 80, tier: 'verified',
+                   pagetableDivisor: 512, vfioGiB: 1, overheadRatio: 1.5, cpuMilli: 80, tier: 'verified',
                    src: `${OVERHEAD_SRC.kvOverhead}; ${OVERHEAD_SRC.hvRatio}; ${OVERHEAD_SRC.benchmark}` },
           // PHYSICAL, not a request: one Longhorn replica engine per VM disk.
           // 60273 MiB / (148 VMs x 3 replicas) = 135.8 MiB per replica.
@@ -585,9 +585,9 @@
           // Measured virt-launcher RSS for a 2 GiB guest — physical only, used by
           // the physical-capacity design rule, never by the sizing totals.
           perVmPhysicalRamMiB: 683,
-          // Term D is KubeVirt's VFIO branch: 1 GiB per passthrough device,
-          // because VFIO locks all guest RAM plus the MMIO window.
-          perDevice: { ramGiB: 1, cpu: 0, tier: 'verified', src: OVERHEAD_SRC.kvOverhead },
+          // VFIO is folded into perVm above: KubeVirt charges 1 GiB per VM
+          // that has passthrough, not per device (verified on a live 2-device VM).
+          perDevice: null,
           // Term E: Harvester overrides Longhorn's own 30% default down to 0%.
           storagePct: 0, storagePctMax: 30, storageTier: 'verified', storageSrc: `${OVERHEAD_SRC.hvSrcCos}; ${OVERHEAD_SRC.lhStorage}`,
           /* Add-on coefficients stay ESTIMATE: the benchmark ran with neither
@@ -645,9 +645,11 @@
              components. The source formula supersedes it.
              Launcher CPU is carried across from the Harvester measurement. */
           perVm: { kind: 'kubevirt', fixedMiB: 220, perVcpuMiB: 8, ioThreadMiB: 8, graphicsMiB: 32,
-                   pagetableDivisor: 512, overheadRatio: 1, cpuMilli: 80, tier: 'verified',
+                   pagetableDivisor: 512, vfioGiB: 1, overheadRatio: 1, cpuMilli: 80, tier: 'verified',
                    src: `${OVERHEAD_SRC.kvOverhead}; ${OVERHEAD_SRC.ocpMem}` },
-          perDevice: { ramGiB: 1, cpu: 0, tier: 'verified', src: OVERHEAD_SRC.kvOverhead },
+          // VFIO is folded into perVm above: KubeVirt charges 1 GiB per VM
+          // that has passthrough, not per device (verified on a live 2-device VM).
+          perDevice: null,
           storagePct: 0, storagePctMax: 30, storageTier: 'estimate', storageSrc: OVERHEAD_SRC.ocpMem,
           addons: {
             /* ODF/Ceph: Red Hat publishes "2 CPU and 5 GiB per device added to a
@@ -878,6 +880,14 @@
         const hostThreads = Math.max(0, num(ctx.hostThreads));
         const hostRam     = Math.max(0, num(ctx.hostRam));
         const hostTb      = Math.max(0, num(ctx.hostStorage)) / 1024;   // raw local disk, TB
+        /* KubeVirt sizes page tables from spec.domain.resources.requests.memory,
+           which is the guest size divided by the memory overcommit ratio — not
+           the guest size itself. Verified against 10 live VMs. */
+        const vmRamReq    = Math.max(0, num(ctx.vmRamRequested, num(ctx.vmRam)));
+        /* VFIO adds 1 GiB per *VM that has any passthrough device*, not per
+           device: the KubeVirt branch is `if HasVFIO(vmi)`, a boolean. A live
+           VM with 2 host devices was measured taking exactly 1 GiB. */
+        const vfioVms     = Math.max(0, num(ctx.gpuVms, ctx.devices > 0 ? 1 : 0));
         const vmCount     = Math.max(0, num(ctx.vmCount));
         const vmRam       = Math.max(0, num(ctx.vmRam));       // total guest RAM, GB
         const vmVcpu      = Math.max(0, num(ctx.vmVcpu));      // total guest vCPU
@@ -1002,9 +1012,11 @@
             const gfx = num(val('perVm', 'graphicsMiB', P.perVm.graphicsMiB));
             const div = Math.max(1, num(val('perVm', 'pagetableDivisor', P.perVm.pagetableDivisor), 512));
             const ratio = Math.max(1, num(val('perVm', 'overheadRatio', P.perVm.overheadRatio), 1));
-            const miB = (fx + io + gfx) * vmCount + pv * vmVcpu + (vmRam * 1024) / div;
+            const vfio = num(val('perVm', 'vfioGiB', P.perVm.vfioGiB)) * 1024 * vfioVms;
+            const miB = (fx + io + gfx) * vmCount + pv * vmVcpu + (vmRamReq * 1024) / div + vfio;
             ram = (miB / 1024) * ratio;
-            label = `Per-VM overhead — ${vmCount} VM(s): (${fx} + ${io} + ${gfx} MiB + ${pv} MiB/vCPU + RAM/${div})`
+            label = `Per-VM overhead — ${vmCount} VM(s): (${fx} + ${io} + ${gfx} MiB + ${pv} MiB/vCPU + RAM/${div}`
+                  + `${vfio ? `, +1 GiB x ${vfioVms} passthrough VM(s)` : ''})`
                   + `${ratio !== 1 ? ` x ${ratio} overhead ratio` : ''}${pc ? ` + ${pc}m CPU` : ''}`;
           } else {
             const f  = num(val('perVm', 'ramFactor',   P.perVm.ramFactor), 1);
@@ -1466,6 +1478,10 @@
             hostRam: host ? host.ram : primaryRaw.ram,
             hostStorage: host ? host.storage : primaryRaw.storage,
             vmCount: agg.vms, vmRam: agg.ram, vmVcpu: agg.cpu, devices: agg.gpu,
+            // Page tables follow the memory REQUEST (guest / overcommit), and
+            // VFIO is charged per passthrough VM rather than per device.
+            vmRamRequested: agg.gpuRam + agg.nonGpuRam / ramRatio,
+            gpuVms: agg.gpuVms,
             // Storage-engine memory scales with replicas per VM disk, and does
             // not exist at all on external/LVM-backed storage.
             replicas: repl, externalStorage: ext,
@@ -1669,7 +1685,9 @@
             const oh = computePlatformOverhead(platformKey, ohCfg, {
               nodeCount: nodes, hostThreads: primaryThreads, hostRam: primaryRaw.ram,
               vmCount, vmRam: avgVm.ram * vmCount, vmVcpu: avgVm.cpu * vmCount,
+              vmRamRequested: (avgVm.ram * vmCount) / ramRatio,
               devices: agg.vms > 0 ? Math.round(agg.gpu * vmCount / agg.vms) : 0,
+              gpuVms: agg.vms > 0 ? Math.round(agg.gpuVms * vmCount / agg.vms) : 0,
             });
             return { nodes, vms: vmCount,
                      cpu: oh.uniformCpu * nodes + oh.lumpCpu,

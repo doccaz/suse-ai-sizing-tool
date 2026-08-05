@@ -64,7 +64,19 @@ is('the KubeVirt formula is documented from source',
    hasFlat('25 MiB virt-launcher-monitor') && hasFlat('100 MiB virt-launcher') &&
    hasFlat('25 MiB virtlogd') && hasFlat('40 MiB virtqemud') && hasFlat('30 MiB qemu'));
 is('the fixed total is stated', hasFlat('= 220 MiB'));
-is('the page-table term is documented', hasFlat('guest RAM / 512'));
+is('the page-table term is documented', hasFlat('memory REQUEST / 512'));
+is('the page-table basis is explained',
+   hasFlat('Page tables follow') && hasFlat('not the guest') && hasFlat('requests.memory'));
+is('VFIO is documented as per-VM, not per-device',
+   hasFlat('+1 GiB per passthrough *VM*') && hasFlat('a boolean'));
+is('the live-lab validation is documented',
+   hasFlat('### 7a.10 Validation against a live cluster'));
+is('  the three-node kubelet verification is recorded',
+   hasFlat('424m / 636m') && hasFlat('440m / 660m') && hasFlat('384m / 576m'));
+is('  the 10-VM per-VM verification is recorded', hasFlat('10 live virt-launcher pods'));
+is('  the two corrections it produced are recorded',
+   hasFlat('VFIO was charged per device; it is per VM') &&
+   hasFlat('Page tables were computed on the guest size; they use the memory request'));
 is('the overhead ratio and its default are documented',
    hasFlat('AdditionalGuestMemoryOverheadRatioDefault = "1.5"') && hasFlat('valid range 1.0–10.0'));
 is('the Harvester-vs-OpenShift ratio difference is explained',

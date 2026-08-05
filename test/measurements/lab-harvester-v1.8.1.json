@@ -1,0 +1,39 @@
+{
+  "_comment": "Read-only measurements from a live Harvester v1.8.1 lab (2 compute + 1 witness). Second, independent calibration point alongside the v1.7.1 benchmark. Captured with kubectl get/describe only; nothing was modified.",
+  "harvesterVersion": "v1.8.1",
+  "kubernetes": "v1.35.6+rke2r1",
+  "settings": {
+    "additional-guest-memory-overhead-ratio": { "value": "", "default": "1.5" },
+    "overcommit-config": { "value": {"cpu":1600,"memory":150,"storage":200} },
+    "guaranteed-instance-manager-cpu": { "value": {"v1":"12","v2":"12"} },
+    "storage-reserved-percentage-for-default-disk": { "value": 0 }
+  },
+  "nodes": [
+    { "name":"harv01lab","threads":24,"capacityCpuMilli":24000,"allocatableCpuMilli":22940,
+      "systemReservedCpuMilli":424,"kubeReservedCpuMilli":636,"allocatablePods":200,
+      "capacityMemKi":96407744,"allocatableMemKi":96407744,
+      "longhornCpuRequestThreads":2.753 },
+    { "name":"harv02lab","threads":32,"capacityCpuMilli":32000,"allocatableCpuMilli":30900,
+      "systemReservedCpuMilli":440,"kubeReservedCpuMilli":660,"allocatablePods":200,
+      "capacityMemKi":96451596,"allocatableMemKi":96451596,
+      "longhornCpuRequestThreads":3.708 },
+    { "name":"harvlab-witness","threads":4,"capacityCpuMilli":4000,"allocatableCpuMilli":3040,
+      "systemReservedCpuMilli":384,"kubeReservedCpuMilli":576,"allocatablePods":200,
+      "capacityMemKi":16259016,"allocatableMemKi":16259016,
+      "longhornCpuRequestThreads":0 }
+  ],
+  "_vmComment": "reqMemGiB is spec.domain.resources.requests.memory (guest / memory overcommit). overheadMiB is the compute container's memory request minus that. vfioVms counts VMs with any passthrough device, not device count.",
+  "vms": [
+    { "name":"downstream-01",  "vcpu":8, "reqMemGiB":8,      "vfio":0, "overheadMiB":510 },
+    { "name":"downstream-02",  "vcpu":8, "reqMemGiB":18.666015625, "vfio":0, "overheadMiB":542 },
+    { "name":"downstream-03",  "vcpu":8, "reqMemGiB":8,      "vfio":0, "overheadMiB":510 },
+    { "name":"gpu-node",       "vcpu":8, "reqMemGiB":12,     "vfio":1, "overheadMiB":2058,
+      "note":"2 VFIO host devices, but only 1 GiB charged - the KubeVirt branch is a boolean" },
+    { "name":"rancher-host",   "vcpu":8, "reqMemGiB":21.33300781, "vfio":0, "overheadMiB":550 },
+    { "name":"rancher-host-2", "vcpu":8, "reqMemGiB":21.33300781, "vfio":0, "overheadMiB":550 },
+    { "name":"rancher-host-3", "vcpu":8, "reqMemGiB":10.666015625, "vfio":0, "overheadMiB":518 },
+    { "name":"rancher-lb",     "vcpu":2, "reqMemGiB":5.3330078125, "vfio":0, "overheadMiB":430 },
+    { "name":"smlm",           "vcpu":8, "reqMemGiB":21.33300781, "vfio":0, "overheadMiB":550 },
+    { "name":"vmware-esx",     "vcpu":8, "reqMemGiB":8,      "vfio":0, "overheadMiB":510 }
+  ]
+}

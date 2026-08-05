@@ -162,5 +162,92 @@ is('add-on coefficients stay Estimate (the benchmark ran without them)',
      nodeCount: 3, hostThreads: 48, hostRam: 128, vmCount: 0, vmRam: 0, vmVcpu: 0, devices: 0 })
      .lines.filter(l => /addon\.monitoring/.test(l.key)).every(l => l.tier === 'estimate'));
 
+/* ===================================================================
+   Second, independent calibration point: a live Harvester v1.8.1 lab
+   (2 compute + 1 witness, heterogeneous). Read-only measurements.
+   The first benchmark was v1.7.1 on 3 identical nodes, so this checks a
+   different version, a different topology and different host sizes.
+   =================================================================== */
+console.log('\n=== Live lab: Harvester v1.8.1 (independent of the v1.7.1 benchmark) ===');
+{
+  const lab = require('./measurements/lab-harvester-v1.8.1.json');
+
+  console.log('\n--- Term A: kubelet reserve, against real kubelet config ---');
+  for (const n of lab.nodes) {
+    const total = harvesterKubeletCpu(n.threads) * 1000;
+    near(`  ${n.name} (${n.threads} thr) system-reserved`, total * 2 / 5, n.systemReservedCpuMilli, 0.01, 'm');
+    near(`  ${n.name} (${n.threads} thr) kube-reserved`,   total * 3 / 5, n.kubeReservedCpuMilli, 0.01, 'm');
+    near(`  ${n.name} allocatable = capacity - reserve`,
+         n.capacityCpuMilli - total, n.allocatableCpuMilli, 0.01, 'm');
+  }
+  is('the +400m tier applies (maxPods is 200 on every node)',
+     lab.nodes.every(n => n.allocatablePods === 200));
+
+  console.log('\n--- No kubelet MEMORY reservation (the model assumes none) ---');
+  is('capacity memory == allocatable memory on every node',
+     lab.nodes.every(n => n.capacityMemKi === n.allocatableMemKi));
+
+  console.log('\n--- Longhorn: 12% of ALLOCATABLE, and CPU-only ---');
+  for (const n of lab.nodes.filter(n => n.longhornCpuRequestThreads > 0)) {
+    near(`  ${n.name} instance-manager CPU request`,
+         0.12 * (n.allocatableCpuMilli / 1000), n.longhornCpuRequestThreads, 0.1, ' thr');
+  }
+  is('12% of allocatable, not of capacity', lab.nodes.every(n =>
+     n.longhornCpuRequestThreads === 0 ||
+     Math.abs(n.longhornCpuRequestThreads - 0.12 * n.capacityCpuMilli / 1000) > 0.05));
+
+  console.log('\n--- Settings the model hard-codes ---');
+  is('overhead ratio default is 1.5',
+     lab.settings['additional-guest-memory-overhead-ratio'].default === '1.5');
+  is('guaranteed-instance-manager-cpu is 12% for both data engines',
+     lab.settings['guaranteed-instance-manager-cpu'].value.v1 === '12' &&
+     lab.settings['guaranteed-instance-manager-cpu'].value.v2 === '12');
+  is('storage reserved percentage is 0', lab.settings['storage-reserved-percentage-for-default-disk'].value === 0);
+
+  console.log('\n--- Term C: per-VM overhead vs 10 real virt-launcher pods ---');
+  let worst = 0;
+  for (const v of lab.vms) {
+    const oh = computePlatformOverhead('harvester', {}, {
+      nodeCount: 2, hostThreads: 24, hostRam: 92, hostStorage: 2000,
+      vmCount: 1, vmRam: v.reqMemGiB, vmRamRequested: v.reqMemGiB, vmVcpu: v.vcpu,
+      devices: v.vfio, gpuVms: v.vfio, replicas: 3, externalStorage: false });
+    const model = oh.perVmRam * 1024;
+    worst = Math.max(worst, Math.abs(model - v.overheadMiB) / v.overheadMiB * 100);
+    near(`  ${v.name} (${v.vcpu} vCPU, ${v.reqMemGiB.toFixed(1)} GiB${v.vfio ? ', VFIO' : ''})`,
+         model, v.overheadMiB, 0.5, ' MiB');
+  }
+  is(`worst per-VM error across 10 live VMs is under 0.1% (${worst.toFixed(4)}%)`, worst < 0.1);
+
+  console.log('\n--- VFIO is charged per VM, not per device ---');
+  {
+    const gpu = lab.vms.find(v => v.vfio);
+    const base = computePlatformOverhead('harvester', {}, {
+      nodeCount: 2, hostThreads: 24, hostRam: 92, hostStorage: 2000, vmCount: 1,
+      vmRam: gpu.reqMemGiB, vmRamRequested: gpu.reqMemGiB, vmVcpu: gpu.vcpu,
+      devices: 0, gpuVms: 0, replicas: 3, externalStorage: false }).perVmRam * 1024;
+    near('  one VFIO VM adds exactly 1 GiB x the 1.5 ratio', gpu.overheadMiB - base, 1536, 0.01, ' MiB');
+    // The live VM had TWO host devices and still paid only 1 GiB.
+    const two = computePlatformOverhead('harvester', {}, {
+      nodeCount: 2, hostThreads: 24, hostRam: 92, hostStorage: 2000, vmCount: 1,
+      vmRam: gpu.reqMemGiB, vmRamRequested: gpu.reqMemGiB, vmVcpu: gpu.vcpu,
+      devices: 2, gpuVms: 1, replicas: 3, externalStorage: false }).perVmRam * 1024;
+    near('  a 2-device VM still pays only 1 GiB (matches the live measurement)',
+         two, gpu.overheadMiB, 0.01, ' MiB');
+  }
+
+  console.log('\n--- Page tables follow the memory REQUEST, not the guest size ---');
+  {
+    const mk = (req) => computePlatformOverhead('harvester', {}, {
+      nodeCount: 2, hostThreads: 24, hostRam: 92, hostStorage: 2000, vmCount: 1,
+      vmRam: 32, vmRamRequested: req, vmVcpu: 8, devices: 0, gpuVms: 0,
+      replicas: 3, externalStorage: false }).perVmRam * 1024;
+    // 32 GiB guest at 150% overcommit requests 21.33 GiB; that is what the live
+    // rancher-host VMs show, and their overhead is 550 MiB not 570 MiB.
+    near('  32 GiB guest at 150% overcommit matches the live 550 MiB',
+         mk(21.33300781), 550, 0.5, ' MiB');
+    is('  using the guest size instead would overstate it', mk(32) > 550);
+  }
+}
+
 console.log(`\n${fails === 0 ? 'BENCHMARK CALIBRATION PASSED' : fails + ' CHECK(S) FAILED'}`);
 process.exit(fails === 0 ? 0 : 1);
