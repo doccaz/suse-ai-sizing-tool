@@ -1,0 +1,10 @@
+{"items":[
+ {"metadata":{"name":"harv01lab","labels":{"node-role.kubernetes.io/control-plane":"true"}},
+  "status":{"capacity":{"cpu":"24","memory":"96407744Ki"},
+            "allocatable":{"cpu":"22940m","memory":"96407744Ki"},
+            "nodeInfo":{"kubeletVersion":"v1.35.6+rke2r1"}}},
+ {"metadata":{"name":"harv02lab","labels":{"node-role.kubernetes.io/control-plane":"true"}},
+  "status":{"capacity":{"cpu":"32","memory":"96451596Ki"},
+            "allocatable":{"cpu":"30900m","memory":"96451596Ki"},
+            "nodeInfo":{"kubeletVersion":"v1.35.6+rke2r1"}}}
+]}

@@ -6,7 +6,12 @@
 const fs = require('fs');
 const path = require('path');
 
-const SRC = process.env.SIZING_HTML || process.argv[2] ||
+/* argv[2] is only the source when this file IS the program. When it is
+   required as a module the caller owns argv — validate.js passes a capture
+   file there, and picking that up made the harness try to parse JSON as the
+   app. Env var still wins, so callers can point at another build. */
+const SRC = process.env.SIZING_HTML ||
+            (require.main === module ? process.argv[2] : null) ||
             path.join(__dirname, '..', 'index.html');
 const src = fs.readFileSync(SRC, 'utf8');
 

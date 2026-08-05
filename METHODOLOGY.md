@@ -1289,6 +1289,12 @@ asymmetric DR sites — see Limitations.
   that one node actually carries it. It does not size that node individually,
   so a deliberately heterogeneous control plane is not modelled.
 - Dedicated-witness and other asymmetric-role topologies are not modelled.
+- Anyone with cluster access can produce a calibration point without knowing
+  anything about this model: `test/measurements/capture/` holds read-only
+  capture scripts for all five platforms, and `validate.js` scores the result
+  against the coefficients term by term. For vSphere and AHV this is now the
+  *only* route to better numbers, since neither vendor publishes them
+  (§ 7a.6a).
 - **Only the Harvester model is calibrated.** vSphere, Proxmox, AHV and
   OpenShift Virtualization now model every significant category, but from vendor
   documentation and shipped manifests rather than measurement (§ 7a.1b), so

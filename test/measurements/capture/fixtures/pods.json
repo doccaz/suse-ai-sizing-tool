@@ -1,0 +1,16 @@
+{"items":[
+ {"metadata":{"name":"lh-im-a","namespace":"longhorn-system","ownerReferences":[{"kind":"DaemonSet"}]},
+  "spec":{"nodeName":"harv02lab","containers":[{"name":"m","resources":{"requests":{"cpu":"3708m","memory":"0"}}}]}},
+ {"metadata":{"name":"agent-a","namespace":"cattle-system","ownerReferences":[{"kind":"DaemonSet"}]},
+  "spec":{"nodeName":"harv02lab","containers":[{"name":"a","resources":{"requests":{"cpu":"100m","memory":"256Mi"}}}],
+          "initContainers":[{"name":"i","resources":{"requests":{"cpu":"500m","memory":"64Mi"}}}]}},
+ {"metadata":{"name":"lh-im-b","namespace":"longhorn-system","ownerReferences":[{"kind":"DaemonSet"}]},
+  "spec":{"nodeName":"harv01lab","containers":[{"name":"m","resources":{"requests":{"cpu":"2753m","memory":"0"}}}]}},
+ {"metadata":{"name":"rancher-1","namespace":"cattle-system","ownerReferences":[{"kind":"ReplicaSet"}]},
+  "spec":{"nodeName":"harv01lab","containers":[{"name":"r","resources":{"requests":{"cpu":"1075m","memory":"1367Mi"}}}]}},
+ {"metadata":{"name":"etcd-static","namespace":"kube-system","ownerReferences":[{"kind":"Node"}]},
+  "spec":{"nodeName":"harv01lab","containers":[{"name":"e","resources":{"requests":{"cpu":"1500m","memory":"2662Mi"}}}]}},
+ {"metadata":{"name":"virt-launcher-x","namespace":"default","ownerReferences":[{"kind":"VirtualMachineInstance"}],
+   "annotations":{"kubevirt.io/domain":"downstream-01"}},
+  "spec":{"nodeName":"harv02lab","containers":[{"name":"compute","resources":{"requests":{"cpu":"80m","memory":"8702Mi"}}}]}}
+]}

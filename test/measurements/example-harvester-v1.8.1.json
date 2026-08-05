@@ -1,0 +1,51 @@
+{
+  "schema": "suse-ai-sizing-tool/measurement/v1",
+  "platform": "harvester",
+  "capturedAt": "2026-08-04T00:00:00Z",
+  "anonymized": true,
+  "versions": { "platform": "v1.8.1", "kubernetes": "v1.35.6+rke2r1" },
+
+  "_comment": "The lab-harvester-v1.8.1.json capture expressed in the measurement schema. Same numbers, same read-only origin (kubectl get/describe only); this file exists so validate.js has a real capture to run against, and as the worked example to copy. The original file is kept in its pre-schema shape because benchmark.js reads it directly.",
+
+  "_addonComment": "Scored against the add-on configuration the cluster actually ran: neither rancher-monitoring nor rancher-logging was installed, and this is a standalone Harvester rather than one imported into an external Rancher.",
+  "addons": { "monitoring": false, "logging": false, "rancher": false },
+
+  "nodes": [
+    { "name": "node-1", "threads": 24, "ramGiB": 91.94, "role": "worker" },
+    { "name": "node-2", "threads": 32, "ramGiB": 91.98, "role": "worker" },
+    { "name": "node-3", "threads": 4,  "ramGiB": 15.51, "role": "witness" }
+  ],
+
+  "_termComment": "Per-node terms are stated for the 24-thread node. The kubelet reserve is systemReserved+kubeReserved from the node's own kubelet config (424m+636m); Longhorn is the longhorn-system namespace's summed CPU requests, whose memory requests are genuinely zero. The cluster row is the v1.8.1 lab decomposed by workload kind: every Deployment/StatefulSet across all namespaces, counted once.",
+  "terms": [
+    { "key": "kubelet", "modelKey": "kubelet", "scope": "per-node", "basis": "reserve",
+      "cpuThreads": 1.06, "ramGiB": 0, "node": "node-1",
+      "detail": "systemReserved 424m + kubeReserved 636m" },
+    { "key": "longhorn-system", "modelKey": "lhim", "scope": "per-node", "basis": "request",
+      "cpuThreads": 2.753, "ramGiB": 0, "node": "node-1",
+      "detail": "instance-manager guaranteed CPU; memory requests are zero" },
+    { "key": "all-cluster-workloads", "scope": "cluster", "basis": "request", "complete": true,
+      "cpuThreads": 3.875, "ramGiB": 7.135,
+      "detail": "every Deployment/StatefulSet in every namespace, counted once" }
+  ],
+
+  "_vmComment": "reqMemGiB is spec.domain.resources.requests.memory (guest / memory overcommit). overheadMiB is the compute container's memory request minus that. vfio counts VMs with any passthrough device, not device count.",
+  "vms": [
+    { "name": "vm-1",  "vcpu": 8, "reqMemGiB": 8,            "vfio": 0, "overheadMiB": 510 },
+    { "name": "vm-2",  "vcpu": 8, "reqMemGiB": 18.666015625, "vfio": 0, "overheadMiB": 542 },
+    { "name": "vm-3",  "vcpu": 8, "reqMemGiB": 8,            "vfio": 0, "overheadMiB": 510 },
+    { "name": "vm-4",  "vcpu": 8, "reqMemGiB": 12,           "vfio": 1, "overheadMiB": 2058,
+      "note": "2 VFIO host devices, but only 1 GiB charged - the KubeVirt branch is a boolean" },
+    { "name": "vm-5",  "vcpu": 8, "reqMemGiB": 21.33300781,  "vfio": 0, "overheadMiB": 550 },
+    { "name": "vm-6",  "vcpu": 8, "reqMemGiB": 21.33300781,  "vfio": 0, "overheadMiB": 550 },
+    { "name": "vm-7",  "vcpu": 8, "reqMemGiB": 10.666015625, "vfio": 0, "overheadMiB": 518 },
+    { "name": "vm-8",  "vcpu": 2, "reqMemGiB": 5.3330078125, "vfio": 0, "overheadMiB": 430 },
+    { "name": "vm-9",  "vcpu": 8, "reqMemGiB": 21.33300781,  "vfio": 0, "overheadMiB": 550 },
+    { "name": "vm-10", "vcpu": 8, "reqMemGiB": 8,            "vfio": 0, "overheadMiB": 510 }
+  ],
+
+  "notes": [
+    "2 compute nodes + 1 witness; the witness runs no Longhorn instance-manager.",
+    "rancher-monitoring and rancher-logging were NOT installed, so the add-on coefficients are not validated by this capture."
+  ]
+}

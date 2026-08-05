@@ -1,0 +1,6 @@
+{"items":[
+ {"metadata":{"name":"downstream-01","namespace":"default"},
+  "spec":{"domain":{"cpu":{"sockets":1,"cores":8,"threads":1},
+                    "resources":{"requests":{"memory":"8Gi"}},
+                    "devices":{}}}}
+]}
