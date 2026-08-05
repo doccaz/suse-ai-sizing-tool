@@ -146,6 +146,16 @@ const OUT = process.env.SCREENSHOT_DIR || require('os').tmpdir();
     if (['vsphere', 'proxmox', 'ahv'].includes(p)) {
       is(`  "${p}" does not claim a control-plane or kubelet term it lacks`,
          !/control-plane extra on the first/i.test(b2) && !/kubelet reserve/i.test(b2));
+      // "Pods" and "scheduler requests" are Kubernetes-only. These platforms
+      // have neither, and the panel used to say both regardless of platform.
+      is(`  "${p}" does not describe its overhead in Kubernetes terms`,
+         !/platform pods/i.test(b2) && !/scheduler requests/i.test(b2));
+      is(`  "${p}" says its figures are host consumption instead`,
+         /host consumption/i.test(b2));
+    }
+    if (['harvester', 'ocpvirt'].includes(p)) {
+      is(`  "${p}" still describes requests and pods`,
+         /platform pods/i.test(b2) && /scheduler requests/i.test(b2));
     }
   }
 

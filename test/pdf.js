@@ -127,6 +127,52 @@ const URL = 'file://' + (process.env.SIZING_HTML || path.join(__dirname, '..', '
   is('provenance footnote does not collide with the footer',
      !/platform\s*\n?\s*Generated/i.test(text) && !/Generated\s+\d.*derivations/i.test(text));
 
+  /* Second pass on a NON-Kubernetes platform. The provenance footnote used to
+     assert the Kubernetes basis, a lower-bound direction and Harvester's
+     no-kubelet-memory quirk for every platform alike — all three are false on
+     ESXi, and the customer reads this page. */
+  {
+    // The platform selector only exists on the Virtualization tab.
+    await page.evaluate(() => {
+      const b = [...document.querySelectorAll('button')].find(x => /virtualization/i.test(x.textContent));
+      if (b) b.click();
+    });
+    await page.waitForFunction(
+      () => /virtualization platform/i.test(document.body.innerText), { timeout: 30000 });
+    const switched = await page.evaluate(() => {
+      window.__pdfB64 = null;
+      const sel = [...document.querySelectorAll('select')]
+        .find(s => [...s.options].some(o => o.value === 'vsphere'));
+      if (!sel) return false;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+      setter.call(sel, 'vsphere'); sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    });
+    is('vSphere selectable for the second report', switched);
+    await new Promise(r => setTimeout(r, 1500));
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find(x => /pdf|report/i.test(x.textContent)).click();
+    });
+    await page.waitForFunction(() => !!window.__pdfB64, { timeout: 120000 }).catch(() => {});
+    const b2 = await page.evaluate(() => window.__pdfB64);
+    is('vSphere PDF was generated', !!b2);
+    if (b2) {
+      require('fs').writeFileSync('/tmp/sizing-report-vsphere.pdf', Buffer.from(b2, 'base64'));
+      const t2 = require('child_process')
+        .execFileSync('pdftotext', ['-layout', '/tmp/sizing-report-vsphere.pdf', '-'],
+                      { encoding: 'utf8', maxBuffer: 64e6 })
+        .replace(/\s+/g, ' ');
+      is('  vSphere report names the platform', /VMware vSphere/i.test(t2));
+      is('  ... states a host-consumption basis', /host consumption/i.test(t2));
+      is('  ... does not claim a scheduler-request basis',
+         !/figures are scheduler requests/i.test(t2));
+      is('  ... does not repeat Harvester’s no-kubelet-memory caveat',
+         !/no kubelet memory reservation/i.test(t2));
+      is('  ... does not claim to be calibrated', !/calibrated against measurements/i.test(t2));
+      is('  ... and does not promise the total is a floor', !/lower bound/i.test(t2));
+    }
+  }
+
   if (fails) {
     const i = text.search(/NaN|undefined/);
     if (i >= 0) console.log('\ncontext:', JSON.stringify(text.slice(Math.max(0, i - 120), i + 120)));

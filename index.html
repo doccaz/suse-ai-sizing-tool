@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.12.0";
+      const APP_VERSION = "2.12.1";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -3034,19 +3034,29 @@
 
               {!isNone && (
                 <div className="text-xs text-gray-500 bg-suse-bg border border-suse-border rounded-md p-3 leading-relaxed">
+                  {/* "Pods" and "scheduler requests" are Kubernetes concepts.
+                      Only Harvester and OpenShift Virt have them; on ESXi, AHV
+                      and KVM the same figures are host consumption, and saying
+                      "requests" there describes a layer the platform lacks. */}
                   Overhead is applied as {P.kubeletCpu ? 'a per-node kubelet reserve, ' : ''}
-                  per-node platform pods,
-                  {/* Only claim a control-plane term when this platform has one:
-                      vSphere, AHV and Proxmox model neither scope. */}
+                  per-node {P.kubeletCpu ? 'platform pods' : 'host and management services'},
+                  {/* Claim a control-plane term only when this platform has one.
+                      Every platform now models at least one cluster singleton
+                      (vCenter, Prism Central, corosync), but keep the branch:
+                      an override can zero it out. */}
                   {vs.overhead.clusterRam > 0
                     ? <> cluster services counted <strong className="text-gray-400">once</strong> (they do not
                         replicate per node),</>
                     : vs.overhead.infraCount > 0
                       ? <> a control-plane extra on the first {vs.overhead.infraCount} node(s),</>
                       : null}
-                  {' '}per-VM hypervisor overhead, per-device passthrough and a storage reserve. Figures are
-                  scheduler <strong className="text-gray-400">requests</strong> — what blocks VM placement
-                  {P.kubeletCpu ? ' — plus the kubelet reserve. ' : '. '}
+                  {' '}per-VM hypervisor overhead, per-device passthrough and a storage reserve.{' '}
+                  {P.kubeletCpu
+                    ? <>Figures are scheduler <strong className="text-gray-400">requests</strong> — what blocks
+                       VM placement — plus the kubelet reserve. </>
+                    : <>{P.label.replace(/ \/.*$/, '')} has no scheduler-request layer, so these figures are
+                       <strong className="text-gray-400"> host consumption</strong>: what is reserved and what
+                       is actually used are the same thing. </>}
                   Your <strong className="text-gray-400">overcommit ratios are never
                   changed</strong> by this selection; where a platform conflicts with them (Nutanix AHV cannot
                   overcommit memory) it is reported as a design-rule check instead. Per-host
@@ -3399,11 +3409,15 @@
                       )}
                     </div>
                     <p className="mt-2 text-[10px] text-gray-600 leading-relaxed">
-                      {/* Only Harvester has a kubelet layer; don't attribute one
-                          to platforms that have none. */}
-                      Figures are scheduler <strong>requests</strong>
-                      {vs.overhead.lines.some(l => l.basis === 'reserve') && <> plus the kubelet reserve</>} — what
-                      actually blocks a VM from being placed.
+                      {/* Only the KubeVirt platforms have a scheduler-request
+                          layer at all. On ESXi, AHV and KVM these same figures
+                          are host consumption, so naming them "requests" would
+                          describe machinery the platform does not have. */}
+                      {vs.overhead.lines.some(l => l.basis === 'reserve')
+                        ? <>Figures are scheduler <strong>requests</strong> plus the kubelet reserve — what
+                           actually blocks a VM from being placed.</>
+                        : <>These figures are <strong>host consumption</strong> — this platform has no
+                           scheduler-request layer, so what is reserved and what is used are the same thing.</>}
                       {vs.overhead.lines.some(l => l.basis === 'physical') && <> Lines marked <em>physical RAM only</em> are
                       consumed but not requested: they never reduce schedulable capacity, but the hosts must still
                       have the RAM.</>}
@@ -3887,24 +3901,42 @@
             }
 
             doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(MUTE);
+            /* Every claim below has to be true of the SELECTED platform. This
+               footnote used to assert the Kubernetes basis, a lower-bound
+               direction and Harvester's no-kubelet-memory quirk unconditionally,
+               none of which hold on ESXi/AHV/KVM or on OpenShift Virt. */
+            const pdfIsK8s = oh.lines.some(l => l.basis === 'reserve');
             const prov = doc.splitTextToSize(
               (oh.depthGaps && oh.depthGaps.length
                 ? `Model completeness — this platform's overhead model does not yet cover: ${oh.depthGaps.join('; ')}. `
-                  + 'The totals above are therefore a LOWER BOUND on real overhead, and should not be compared '
-                  + 'against SUSE Virtualization (Harvester), whose model is calibrated against measurements from '
-                  + 'a real cluster. '
-                : 'Model completeness — every line above is calibrated against measurements from a real cluster. ')
+                  + 'Treat the totals as less precise than SUSE Virtualization (Harvester), whose model is '
+                  + 'calibrated against measurements from a real cluster. The direction of the error is not '
+                  + 'uniform, so do not assume the figures are a floor. '
+                : oh.depth === 'calibrated'
+                  ? 'Model completeness — every line above is calibrated against measurements from a real cluster. '
+                  : 'Model completeness — every significant category is modelled, but from vendor documentation '
+                    + 'and shipped manifests rather than measurement, so treat the totals as less precise than a '
+                    + 'calibrated platform. ')
               + 'Src — the numbers in the table\'s last column index the Sources list above. '
-              + 'Basis — figures are scheduler REQUESTS (what blocks a VM from being placed) plus the kubelet '
-              + 'reserve. Rows marked "physical RAM only" are consumed but not requested: they do not reduce '
-              + 'schedulable capacity, but the hosts must still have that RAM. '
-              + 'Provenance — "Verified": traced to vendor source code, or a published worked example this model '
-              + 'reproduces numerically. "Measured": taken from an independent benchmark of a real cluster '
-              + '(Harvester v1.7.1, one hardware configuration, no monitoring or logging add-ons). "Estimate": '
-              + 'vendor documentation, blog or community figure; treat as indicative and adjust to your own '
-              + 'measurements. Harvester configures no kubelet memory reservation (it sets '
-              + 'system-reserved/kube-reserved for CPU only), so no RAM figure here is vendor-specified — they are '
-              + 'calibrated against measurement instead. Overcommit ratios are never altered by the platform '
+              + (pdfIsK8s
+                  ? 'Basis — figures are scheduler REQUESTS (what blocks a VM from being placed) plus the kubelet '
+                    + 'reserve. Rows marked "physical RAM only" are consumed but not requested: they do not reduce '
+                    + 'schedulable capacity, but the hosts must still have that RAM. '
+                  : 'Basis — this platform has no scheduler-request layer, so these figures are HOST CONSUMPTION: '
+                    + 'what is reserved and what is actually used are the same thing. ')
+              + 'Provenance — "Verified": traced to vendor source code or a shipped manifest, or a published '
+              + 'worked example this model reproduces numerically. "Measured": taken from a benchmark or a live '
+              + 'cluster. "Estimate": vendor documentation, blog or community figure; treat as indicative and '
+              + 'adjust to your own measurements. '
+              + (oh.platform === 'harvester'
+                  ? 'Harvester configures no kubelet memory reservation (it sets system-reserved/kube-reserved '
+                    + 'for CPU only), so no RAM figure here is vendor-specified — they are calibrated against '
+                    + 'measurement instead. '
+                  : oh.platform === 'ocpvirt'
+                    ? 'OpenShift auto-sizes its kubelet reserve from node size at boot, reserving memory as well '
+                      + 'as CPU; the control-plane components are counted once per cluster, not per node. '
+                    : '')
+              + 'Overcommit ratios are never altered by the platform '
               + 'selection. Full derivations and citations: METHODOLOGY.md.', pageW() - margin * 2);
             // Keep the footnote off the page footer (same guard as the network section).
             if (vy + prov.length * 3 + 4 > pageH() - CONTENT_BOTTOM) { doc.addPage('a4', 'p'); vy = CONTENT_TOP; }
