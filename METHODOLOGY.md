@@ -389,7 +389,7 @@ separate axis: how much of a platform is modelled at all.
 | Platform | Model | Line items | Basis of coefficients |
 |---|---|---|---|
 | **Harvester** | **Calibrated** | 16 | Vendor source code + a measured cluster |
-| OpenShift Virtualization | Modelled | 5 | Red Hat published figures + Harvester measurement carried across |
+| OpenShift Virtualization | Modelled | 11 | Shipped KubeVirt/HCO/CNO manifests + OpenShift's own node auto-sizing script |
 | vSphere / ESXi | Modelled | 4 | Broadcom published tables and formulas |
 | Nutanix AHV | Modelled | 4 | Nutanix documentation |
 | Proxmox VE | Modelled | 5 | Proxmox and Ceph documentation |
@@ -406,7 +406,7 @@ At 5 nodes / 100 VMs on 96-thread / 512 GB / 7.68 TB hosts:
 | Platform | CPU | RAM |
 |---|---|---|
 | Harvester | 84 thr | 77 GB |
-| OpenShift Virtualization | 59 thr | 165 GB |
+| OpenShift Virtualization | 52 thr | 236 GB |
 | vSphere + vSAN | 53 thr | 116 GB |
 | Nutanix AHV | 51 thr | 209 GB |
 | Proxmox + Ceph | 15 thr | 102 GB |
@@ -421,6 +421,12 @@ architectural rather than artifacts:
   as removed capacity. Same physical cost, different accounting.
 - **AHV's RAM is high because the CVM is a fixed 32 GB per host**, plus Prism
   Central. That is a genuine design trade, not a modelling artifact.
+- **OpenShift's RAM is high because its kubelet reserves memory and Harvester's
+  does not.** OpenShift runs a node auto-sizing script that writes
+  `systemReserved` at boot; on a 512 GB host that is **16 GiB per node before
+  the scheduler sees anything** (§ 7a.3a). Harvester writes no memory
+  reservation at all, so the same physical cost shows up on Harvester as pod
+  requests and resident memory rather than as removed capacity.
 - **Proxmox is genuinely the leanest stack** — no Kubernetes layer, no guaranteed
   storage reservation.
 
@@ -473,9 +479,18 @@ are stored per configuration and survive export/import.
 > (§ 7a.9). Charging the control plane per node over-states a 3-node cluster's
 > memory by roughly 50%.
 >
-> OpenShift Virtualization is different — its published "+2 cores per node"
-> genuinely is per node — so the model keeps a separate per-control-plane-node
-> scope for platforms that need it. Harvester does not use it.
+> **OpenShift Virtualization makes exactly the same mistake if you take its
+> published "+2 cores per node" literally.** Red Hat's guidance is a
+> consumption-basis recommendation that amortises the control plane over the
+> nodes; charged as a per-node scheduler request it overstated a 20-node cluster
+> by roughly 7 GB per node. The model now itemises instead: only virt-handler is
+> a DaemonSet, so everything else KubeVirt runs (virt-api, virt-controller,
+> virt-exportproxy, CDI, HCO and the operators) sits in the cluster scope, and
+> Red Hat's per-node figure is kept as a *consumption* line for cross-checking
+> rather than as a request (§ 7a.6a).
+>
+> The per-control-plane-node scope survives for what genuinely is per node:
+> OpenShift's three masters. Harvester does not use it.
 
 Terms A, B and E reduce each host's usable capacity. B′, C and D are added to
 fleet demand. The split matters: `capOf()` is per *host type*, so a cost carried
@@ -493,7 +508,7 @@ capacity is unrepresentable.
 **Per-VM overhead is added outside the overcommit divide.** It is real host
 memory backing the guest process; it cannot be overcommitted away.
 
-### 7a.3 Term A — kubelet reserve (Harvester only)
+### 7a.3 Term A — kubelet reserve (Harvester)
 
 Harvester derives its kubelet CPU reservation from the GKE node-allocatable
 formula, then applies **twice** the result, split `system:kube = 2:3`:
@@ -526,9 +541,53 @@ regression test.
 
 Tier: **Verified**. Sources: [Harvester CPU Pinning — Calculation of Shared CPU Pool](https://docs.harvesterhci.io/v1.8/vm/cpu-pinning), [GKE node resource reservations](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/plan-node-sizes).
 
-Other platforms have no kubelet layer, so Term A is zero for them and their
-node reserve is folded into Term B. (OpenShift Virtualization's published
-"+2 cores per node" appears as a Term B row.)
+vSphere, AHV and Proxmox have no kubelet layer, so Term A is zero for them and
+their node reserve is folded into Term B. OpenShift Virtualization has its own
+Term A — a different formula, and the only one that reserves memory (§ 7a.3a).
+
+### 7a.3a Term A — OpenShift Virtualization kubelet reserve
+
+Every OpenShift worker runs a node auto-sizing script at boot which computes
+`systemReserved` from the node's own size and writes it into a kubelet drop-in.
+The docs state that clusters upgraded from earlier than 4.21 have it disabled
+by default (re-enabled by deleting the `50-worker-auto-sizing-disabled` machine
+config), and that `autoSizingReserved: false` is how you opt out — so the model
+assumes auto-sizing is active, which is the documented default behaviour. Unlike Harvester's, it reserves **memory as well as
+CPU** — and on a large host the memory half is the single biggest per-node term
+in the whole model.
+
+```
+cpu(threads)  = threads > 1 ? 0.06 + 0.012 × (threads − 1) : 0.06
+                floored at 0.5                                   (auto-sizing v2)
+
+ram(GB)       = 1 GiB                        for the first 8 GB
+              + 6%  of the next 120 GB
+              + 2%  of everything above
+                rounded to whole GiB
+```
+
+Source: `openshift/machine-config-operator`
+`templates/common/_base/files/kubelet-auto-sizing.yaml`
+(`dynamic-system-reserved-calc.sh`). The model transcribes the script verbatim,
+including two quirks that a tidied-up version would get wrong: the middle memory
+tier subtracts **112**, not 120, before the 2% tier begins, and the CPU result is
+floored at **0.5 threads** regardless of how small the node is.
+
+| Host | CPU reserve | RAM reserve |
+|---|---|---|
+| 4 threads / 32 GB | 500 m (floor) | 2 GiB |
+| 16 threads / 128 GB | 500 m (floor) | 8 GiB |
+| 64 threads / 256 GB | 820 m | 10 GiB |
+| 96 threads / 512 GB | 1200 m | 16 GiB |
+
+Tier: **Verified**. This is not a vendor recommendation with headroom in it — it
+is the arithmetic the node itself performs.
+
+> **Why this is not double-counted against the pod requests below.**
+> `systemReserved` is capacity withheld for processes *outside* pods — kubelet,
+> CRI-O, systemd. Pod requests (virt-handler, ovnkube-node, …) are charged
+> against what is left. Both are real and both are counted, exactly as the
+> kubelet does it.
 
 ### 7a.4 Term B — SUSE Virtualization (Harvester) coefficients
 
@@ -780,16 +839,40 @@ for. At ~4 TB per OSD that is ~1 GiB per TB.
 
 **OpenShift Virtualization**
 
+Every request below is read off the manifest that ships it, at the component's
+declared replica count. Nothing here is a sizing recommendation restated as a
+request.
+
 | Scope | Coefficient | Tier | Source |
 |---|---|---|---|
-| Every node | OpenShift Virtualization management — **+2 cores/node** | **Verified** | [Red Hat](https://developers.redhat.com/blog/2025/01/31/memory-management-openshift-virtualization) |
-| Every node | Node agents (CRI-O, OVN-Kubernetes, monitoring) — 1 thr / 4 GB | Estimate | [Red Hat](https://developers.redhat.com/blog/2025/01/31/memory-management-openshift-virtualization) |
+| Every node *(Term A)* | **Kubelet `systemReserved`** — auto-sized from node size, CPU **and** RAM (§ 7a.3a) | **Verified** | `machine-config-operator` `kubelet-auto-sizing.yaml` |
+| Every node | **virt-handler** (the only KubeVirt DaemonSet) — 10 m / 325 MiB | **Verified** | `kubevirt` `components/daemonsets.go:374` |
+| Every node | **ovnkube-node** — 125 m / 1650 MiB summed across its 9 containers | **Verified** | `cluster-network-operator` `ovnkube-node.yaml` |
+| Every node | Other node DaemonSets (multus, MCD, node-exporter, DNS, CSI) — 0.08 thr / 0.33 GB | Estimate | varies by platform and storage driver |
+| **Once per cluster** | **virt-api + virt-controller + virt-exportproxy**, 2 replicas each — 0.04 thr / 1.81 GB | **Verified** | `kubevirt` `components/deployments.go` |
+| **Once per cluster** | **HCO and the CNV operators** (virt, CDI, SSP, CNAO, HPP, AAQ, migration, autopilot) — 635 m / 2450 MiB | **Verified** | `hyperconverged-cluster-operator` `deploy/operator.yaml` |
+| **Once per cluster** | **CDI** apiserver + controller + upload proxy — 300 m / 450 MiB | **Verified** | `containerized-data-importer` `pkg/operator/resources` |
+| **Once per cluster** | **OpenShift cluster monitoring** — prometheus-k8s ×2, alertmanager-main ×2, thanos-querier ×2, kube-state-metrics, metrics-server and the operators: 240 m / 3179 MiB | **Verified** | `cluster-monitoring-operator` `assets/` |
 | First 3 nodes | **Control plane** — 4 vCPU / 16 GB per master (published minimum) | **Verified** | [Master node sizing](https://github.com/openshift/openshift-docs/blob/main/modules/master-node-sizing.adoc) |
 | Every node *(add-on, on by default)* | **ODF / Ceph** — Red Hat's published *2 CPU and 5 GiB per storage device*, converted to 0.5 thr and 1.25 GB per TB | Estimate | [ODF infrastructure requirements](https://docs.redhat.com/en/documentation/red_hat_openshift_data_foundation/4.20/html/planning_your_deployment/infrastructure-requirements_rhodf) |
 
-OpenShift's control plane genuinely *is* per-node (three masters), so it uses the
-per-control-plane-node scope rather than the cluster-singleton scope Harvester
-uses.
+**Red Hat's published "+2 cores and ~4 GB per node" is deliberately not a row
+above.** It is a consumption-basis recommendation that amortises the control
+plane across the workers; charged as a scheduler request it would double-count
+the cluster scope. It is not carried as a *physical* line either — OpenShift
+Virtualization has no measured per-VM resident figure, so the physical-capacity
+design rule (§ 7a.5a) cannot fire for it, and a coefficient the engine never
+reads would be an editable control that moves no number. Use the figure as a
+sanity check on the itemised total, not as an input.
+
+User-workload monitoring is excluded from the monitoring line: it is opt-in.
+The node-exporter DaemonSet is excluded too — it is counted in the per-node row.
+
+OpenShift uses **both** control-plane scopes, and they are not the same thing:
+the three masters are genuinely per-node hardware (per-control-plane-node scope),
+while the CNV control plane is a set of Deployments that exist once no matter how
+many workers there are (cluster scope). Cluster monitoring is not an add-on
+toggle because OpenShift does not ship without it.
 
 #### Per-VM CPU: applicable only to the KubeVirt platforms
 
@@ -1180,9 +1263,13 @@ asymmetric DR sites — see Limitations.
 - Dedicated-witness and other asymmetric-role topologies are not modelled.
 - **Only the Harvester model is calibrated.** vSphere, Proxmox, AHV and
   OpenShift Virtualization now model every significant category, but from vendor
-  documentation rather than measurement (§ 7a.1b), so their coefficients are
-  less precise. Cross-platform comparison is indicative of shape, not a
-  benchmark.
+  documentation and shipped manifests rather than measurement (§ 7a.1b), so
+  their coefficients are less precise. Cross-platform comparison is indicative
+  of shape, not a benchmark. The error does **not** run consistently in one
+  direction: OpenShift Virtualization is sourced from declared requests and a
+  transcribed reserve formula, so it may sit close or high, whereas vSphere,
+  AHV and Proxmox are doc-sketch coefficients that more likely understate.
+  Do not assume an uncalibrated total is a floor.
 - Storage-service terms are expressed per TB of raw disk, converted from
   per-device vendor figures assuming ~4 TB devices. A cluster built from many
   small devices will cost more than the model predicts, and one built from few

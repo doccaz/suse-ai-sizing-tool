@@ -136,6 +136,12 @@ const OUT = process.env.SCREENSHOT_DIR || require('os').tmpdir();
     if (['vsphere', 'proxmox', 'ahv', 'ocpvirt'].includes(p)) {
       is(`  "${p}" declares its model depth`, /model: modelled/i.test(b2));
     }
+    // OCP-V has both a kubelet reserve and cluster singletons — the panel has
+    // to say so, because "counted once" is the whole point of the v2.11 split.
+    if (p === 'ocpvirt') {
+      is('  "ocpvirt" claims its kubelet reserve', /kubelet reserve/i.test(b2));
+      is('  "ocpvirt" says cluster services are counted once', /cluster services counted/i.test(b2));
+    }
     // Don't describe terms this platform doesn't have.
     if (['vsphere', 'proxmox', 'ahv'].includes(p)) {
       is(`  "${p}" does not claim a control-plane or kubelet term it lacks`,

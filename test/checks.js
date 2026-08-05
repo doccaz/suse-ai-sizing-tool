@@ -1,5 +1,5 @@
-const { gkeReservedCpu, harvesterKubeletCpu, computePlatformOverhead, HYPERVISORS, overrideSchema } =
-  require('./harness.js');
+const { gkeReservedCpu, harvesterKubeletCpu, openshiftReservedCpu, openshiftReservedRam,
+        computePlatformOverhead, HYPERVISORS, overrideSchema } = require('./harness.js');
 
 let fails = 0;
 const eq = (name, got, want, tol = 1e-9) => {
@@ -82,6 +82,61 @@ is('no separate per-device line on KubeVirt platforms',
     vmRam: 64, vmRamRequested: 64, vmVcpu: 16, devices: 8, gpuVms }).perVmRam;
   eq('VFIO adds 1 GiB x 1.5 per passthrough VM', vf(2) - vf(0), 2 * 1.5, 1e-9);
   eq('  ... and does not scale with device count', vf(1) - vf(0), 1.5, 1e-9);
+}
+
+/* ---------------------------------------------------------------------
+   OpenShift Virtualization. Until v2.9 this platform charged its whole
+   control plane per node, which overstated a large cluster badly. These
+   assertions pin BOTH halves of the fix: the singletons must be flat, and
+   the per-node terms must be the small DaemonSet figures plus OpenShift's
+   own auto-sized reserve. Nothing else guards this platform.
+   ------------------------------------------------------------------ */
+console.log('\n--- OpenShift Virtualization: Term A (node auto-sizing) ---');
+// Transcribed from dynamic-system-reserved-calc.sh; see METHODOLOGY § 7a.3a.
+eq('CPU: 60m + 12m per extra thread (96 threads)', openshiftReservedCpu(96), 1.2, 1e-9);
+eq('CPU: floored at 500m on a small node', openshiftReservedCpu(4), 0.5);
+eq('CPU: 0 threads is safe', openshiftReservedCpu(0), 0);
+eq('RAM: 1 GiB flat below 8 GB', openshiftReservedRam(8), 1);
+eq('RAM: 1 + 6% of the next 120 GB (128 GB host)', openshiftReservedRam(128), 8);
+// The script subtracts 112, not 120, before the 2% tier — reproduce it.
+eq('RAM: the 112-not-120 quirk (512 GB host)', openshiftReservedRam(512), 16);
+eq('RAM: 0 GB is safe', openshiftReservedRam(0), 0);
+
+console.log('\n--- OpenShift Virtualization: singletons do not scale ---');
+const ocpCtx = { hostThreads: 96, hostRam: 512, hostStorage: 7680, vmCount: 100, vmRam: 1600,
+                 vmRamRequested: 1600, vmVcpu: 400, devices: 0 };
+const ocp3  = computePlatformOverhead('ocpvirt', {}, { ...ocpCtx, nodeCount: 3 });
+const ocp20 = computePlatformOverhead('ocpvirt', {}, { ...ocpCtx, nodeCount: 20 });
+eq('cluster RAM identical at 3 and 20 nodes', ocp3.clusterRam, ocp20.clusterRam);
+eq('cluster CPU identical at 3 and 20 nodes', ocp3.clusterCpu, ocp20.clusterCpu);
+is('the CNV control plane is in the cluster scope, not per-node',
+   ocp3.lines.some(l => l.scope === 'cluster' && l.key === 'cluster.virtcp'));
+is('only virt-handler is charged per node for KubeVirt',
+   ocp3.lines.filter(l => l.scope === 'per-node' && /virt/i.test(l.label) && l.basis === 'request')
+      .every(l => l.cpu <= 0.05));
+// The regression this whole change exists to prevent.
+is('per-node request RAM is DaemonSet-sized, not control-plane-sized',
+   ocp3.lines.filter(l => l.scope === 'per-node' && l.basis === 'request'
+                          && !l.key.startsWith('addon.'))
+      .reduce((s, l) => s + l.ram, 0) < 3);
+console.log('\n--- OpenShift Virtualization: Term A enters the per-node total ---');
+{
+  const kube = ocp3.lines.find(l => l.key === 'kubelet');
+  is('the kubelet line exists and is a reserve', !!kube && kube.basis === 'reserve');
+  eq('  ... and reserves RAM as well as CPU (Harvester does not)', kube.ram, 16);
+  const perNodeReq = ocp3.lines.filter(l => l.scope === 'per-node' && l.basis === 'request')
+                               .reduce((s, l) => s + l.ram, 0);
+  eq('uniformRam = kubelet reserve + per-node requests', ocp3.uniformRam, 16 + perNodeReq, 1e-9);
+  /* Red Hat's "+2 cores/node" is documentation, not a coefficient. Modelling it
+     as a physical line would ship an editable control that moves no number:
+     ocpvirt has no measured per-VM resident figure, so the physical-capacity
+     design rule cannot fire — the dead-knob failure overrideSchema exists to
+     prevent. It lives in METHODOLOGY § 7a.6a instead. */
+  is('Red Hat’s +2 cores/node guidance is not charged as a coefficient',
+     !ocp3.lines.some(l => l.basis === 'physical'));
+  is('  ... and ocpvirt declares no physical term it cannot enforce',
+     ocp3.physPerNodeRam === 0 && !HYPERVISORS.ocpvirt.perVmPhysicalRamMiB);
+  is('the three masters still use the per-control-plane-node scope', ocp3.infraCount === 3);
 }
 
 console.log('\n--- Overrides ---');

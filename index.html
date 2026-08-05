@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.10.0";
+      const APP_VERSION = "2.11.0";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -461,6 +461,18 @@
         lhBest:     'https://longhorn.io/docs/1.12.0/best-practices/',
         kubevirt:   'https://kubevirt.io/user-guide/compute/resources_requests_and_limits/',
         ocpMem:     'https://developers.redhat.com/blog/2025/01/31/memory-management-openshift-virtualization',
+        /* OpenShift Virtualization control-plane coefficients come from the
+           SHIPPED MANIFESTS, not from a sizing blog: every component below
+           declares its own requests, and requests are what block VM placement.
+           Read off the operator bundles at the versions cited. */
+        kvComponents: 'kubevirt/kubevirt pkg/virt-operator/resource/generate/components/deployments.go (virt-api 5m/500Mi, virt-controller 10m/275Mi, virt-operator 10m/450Mi, virt-exportproxy 5m/150Mi — all Replicas: 2)',
+        kvHandler:  'kubevirt/kubevirt pkg/virt-operator/resource/generate/components/daemonsets.go:374 (virt-handler 10m/325Mi, DaemonSet)',
+        hcoDeploy:  'kubevirt/hyperconverged-cluster-operator deploy/operator.yaml (HCO, webhook, CNAO, SSP, CDI, HPP, AAQ, migration and autopilot operators: 635m / 2450Mi summed)',
+        cdiComponents: 'kubevirt/containerized-data-importer pkg/operator/resources/namespaced/{apiserver,controller,uploadproxy}.go (100m/150Mi each)',
+        ocpAutoSize: 'openshift/machine-config-operator templates/common/_base/files/kubelet-auto-sizing.yaml (dynamic-system-reserved-calc.sh)',
+        ocpAutoSizeDoc: 'https://github.com/openshift/openshift-docs/blob/main/modules/nodes-nodes-resources-configuring-setting.adoc',
+        ovnNode:    'openshift/cluster-network-operator bindata/network/ovn-kubernetes/self-hosted/ovnkube-node.yaml (125m / 1650Mi summed across the DaemonSet containers)',
+        ocpMonitoring: 'openshift/cluster-monitoring-operator assets/ (prometheus-k8s x2 146m/2128Mi, alertmanager-main x2, thanos-querier x2, kube-state-metrics, metrics-server, monitoring-plugin and the operators: 240m / 3179Mi summed; the node-exporter DaemonSet is counted per node instead, and user-workload monitoring is excluded as opt-in)',
         vmwMem:     'https://www.vmware.com/docs/perf-vsphere-memory_management',
         ahvMem:     'https://www.nutanix.com/tech-center/blog/ahv-internals-memory-overcommit',
         ahvCpu:     'https://www.nutanix.com/tech-center/blog/understanding-cpu-resource-management-in-nutanix-ahv',
@@ -515,6 +527,32 @@
         return r;
       };
       const harvesterKubeletCpu = (threads) => 2 * gkeReservedCpu(threads, HARVESTER_MAX_PODS);
+
+      /* OpenShift runs its own node auto-sizing script on every worker at boot
+         (default-on since 4.21), which writes systemReserved into a kubelet
+         drop-in. Unlike Harvester it reserves MEMORY as well as CPU, and on a
+         large host the memory reserve is the single biggest per-node term — a
+         512 GB host reserves 16 GiB before the scheduler sees anything.
+         Both functions are transcribed from dynamic-system-reserved-calc.sh;
+         the odd 112 (rather than 120) in the middle memory tier and the 0.5
+         thread floor on CPU are the script's own, reproduced verbatim. */
+      const openshiftReservedCpu = (threads) => {
+        const t = Math.max(0, Math.floor(threads || 0));
+        if (t <= 0) return 0;
+        // Auto-sizing v2: 60m base + 12m per additional CPU, floored at 0.5.
+        const v = t > 1 ? 0.06 + 0.012 * (t - 1) : 0.06;
+        return Math.max(0.5, Math.round(v * 100) / 100);   // the script prints %.2f
+      };
+      const openshiftReservedRam = (ramGb) => {
+        let left = Math.max(0, Math.floor(ramGb || 0));
+        if (left <= 0) return 0;
+        let r = 1;                                   // 1 GiB flat for the first 8 GB
+        left = left <= 8 ? 0 : left - 8;
+        if (left <= 120) { r += left * 0.06; left = 0; }   // 6% of the next 120 GB
+        else             { r += 6.72; left -= 112; }
+        if (left >= 0) r += left * 0.02;             // 2% of everything above
+        return Math.round(r);                        // the script rounds to whole GiB
+      };
 
       const HYPERVISORS = {
         none: {
@@ -642,13 +680,48 @@
           label: 'Red Hat OpenShift Virtualization',
           depth: 'modelled',
           depthGaps: ['resident memory beyond requests (ODF/Ceph), so the physical-capacity rule is not enforced'],
-          note: 'KubeVirt lineage like Harvester. Red Hat publishes both the per-node core requirement and the per-VM memory formula.',
-          kubeletCpu: null,
+          depthNote: 'Per-node and cluster-singleton terms are read off the shipped KubeVirt/HCO/CNO manifests, and the kubelet reserve is OpenShift’s own auto-sizing script transcribed verbatim — but nothing here has been checked against a running cluster.',
+          note: 'KubeVirt lineage like Harvester, so the same singleton rule applies: virt-api, virt-controller, CDI and the operators are Deployments and are counted ONCE, not per node. OpenShift’s kubelet reserves memory as well as CPU, which Harvester’s does not — on a large host that reserve dominates the per-node cost.',
+          kubeletCpu: 'openshift',
           perNode: [
-            { key: 'virt', label: 'OpenShift Virtualization management workloads (+2 cores/node)', cpu: 2, ram: 4,
-              tier: 'verified', src: OVERHEAD_SRC.ocpMem },
-            { key: 'ocp',  label: 'OpenShift node agents (CRI-O, OVN-Kubernetes, monitoring)', cpu: 1, ram: 4,
-              tier: 'estimate', src: OVERHEAD_SRC.ocpMem },
+            // Only virt-handler is a DaemonSet; everything else KubeVirt runs is
+            // a Deployment and therefore belongs in `cluster` below.
+            { key: 'virt', label: 'virt-handler (KubeVirt node agent, DaemonSet)', cpu: 0.01, ram: 0.32,
+              tier: 'verified', src: OVERHEAD_SRC.kvHandler },
+            { key: 'ovn',  label: 'ovnkube-node (OVN-Kubernetes DaemonSet, 9 containers)', cpu: 0.13, ram: 1.61,
+              tier: 'verified', src: OVERHEAD_SRC.ovnNode },
+            /* multus, machine-config-daemon, node-exporter, DNS node-resolver,
+               node-ca and the CSI node plugins. Each declares requests, but the
+               set installed varies by platform and storage driver, so the sum
+               is an estimate rather than a fixed figure. */
+            { key: 'ocp',  label: 'Other OpenShift node DaemonSets (multus, MCD, node-exporter, DNS, CSI)', cpu: 0.08, ram: 0.33,
+              tier: 'estimate', src: OVERHEAD_SRC.ocpNodes },
+            /* Red Hat's published "+2 cores and ~4 GB per node for OpenShift
+               Virtualization management" is deliberately NOT a line here. It is
+               a consumption-basis recommendation with headroom that amortises
+               the control plane over the nodes, so charging it as a request
+               double-counts the cluster scope below. It is recorded as prose in
+               METHODOLOGY § 7a.6a, and it is not modelled as a physical line
+               either: ocpvirt has no measured per-VM resident figure, so the
+               physical-capacity design rule cannot fire and the coefficient
+               would be an editable control that moves no number. */
+          ],
+          /* Cluster singletons — the fix that mattered. Charging these per node
+             (as this model did before v2.11) overstated a 20-node cluster by
+             ~7 GB/node of RAM that does not exist. */
+          cluster: [
+            { key: 'virtcp', label: 'virt-api + virt-controller + virt-exportproxy (2 replicas each)', cpu: 0.04, ram: 1.81,
+              tier: 'verified', src: OVERHEAD_SRC.kvComponents },
+            { key: 'cnvops', label: 'HCO and the CNV operators (virt, CDI, SSP, CNAO, HPP, AAQ, migration)', cpu: 0.64, ram: 2.39,
+              tier: 'verified', src: OVERHEAD_SRC.hcoDeploy },
+            { key: 'cdi',    label: 'CDI apiserver, controller and upload proxy', cpu: 0.30, ram: 0.44,
+              tier: 'verified', src: OVERHEAD_SRC.cdiComponents },
+            /* Cluster monitoring is not optional on OpenShift, so it is a fixed
+               line rather than an add-on. Prometheus x2, Alertmanager x3,
+               Thanos querier, kube-state-metrics and the operators; the
+               node-exporter half is already in the per-node DaemonSet line. */
+            { key: 'ocpmon', label: 'OpenShift cluster monitoring (Prometheus, Alertmanager, Thanos)', cpu: 0.24, ram: 3.10,
+              tier: 'verified', src: OVERHEAD_SRC.ocpMonitoring },
           ],
           infraNode: [
             // Red Hat's published control-plane minimum: 4 vCPU / 16 GB per
@@ -785,10 +858,13 @@
       /* Model DEPTH, which is a different thing from coefficient provenance.
          A tier says how well one number is sourced; this says how much of a
          platform is modelled at all. Harvester is calibrated line-by-line
-         against a measured cluster; the others are vendor-doc sketches with
-         whole categories still missing, which makes their totals systematically
-         LOW and not comparable to Harvester's. Saying so is the honest
-         alternative to silently shipping a 28x apples-to-oranges gap. */
+         against a measured cluster; the others are not, and their totals are
+         not comparable to Harvester's. Saying so is the honest alternative to
+         silently shipping a 28x apples-to-oranges gap.
+         The direction of the error is NOT uniform, so do not claim it is: a
+         doc-sketch coefficient usually understates, but OpenShift Virt is built
+         from declared requests plus a transcribed reserve formula and can land
+         high. Only 'indicative' promises a floor. */
       const DEPTH = {
         calibrated: { label: 'Calibrated', cls: 'border-suse-green/40 text-suse-green bg-suse-green/10',
                       blurb: 'Every term is modelled and calibrated against measurements from a real cluster.' },
@@ -932,6 +1008,16 @@
           lines.push({ key: 'kubelet', label: `Kubelet reserve (system + kube, ${Math.round(kubeletCpu * 1000)}m)`,
                        scope: 'per-node', basis: 'reserve', cpu: kubeletCpu, ram: 0, tier: 'verified',
                        src: `${OVERHEAD_SRC.hvCpuPin}; ${OVERHEAD_SRC.hvSrcCpu}; ${OVERHEAD_SRC.gke}` });
+        } else if (P.kubeletCpu === 'openshift' && hostThreads > 0) {
+          // OpenShift's auto-sizing reserves RAM too, so this is the one Term A
+          // that touches both dimensions.
+          kubeletCpu = openshiftReservedCpu(hostThreads);
+          const kubeletRam = openshiftReservedRam(hostRam);
+          uniformCpu += kubeletCpu;
+          uniformRam += kubeletRam;
+          lines.push({ key: 'kubelet', label: `Kubelet systemReserved (node auto-sizing: ${Math.round(kubeletCpu * 1000)}m + ${kubeletRam} GiB)`,
+                       scope: 'per-node', basis: 'reserve', cpu: kubeletCpu, ram: kubeletRam, tier: 'verified',
+                       src: `${OVERHEAD_SRC.ocpAutoSize}; ${OVERHEAD_SRC.ocpAutoSizeDoc}` });
         }
         // Allocatable = capacity − kubelet reserve. Percentage-of-node terms are
         // percentages of ALLOCATABLE, not capacity (Longhorn reads
@@ -2910,7 +2996,7 @@
 
               {!isNone && (
                 <div className="text-xs text-gray-500 bg-suse-bg border border-suse-border rounded-md p-3 leading-relaxed">
-                  Overhead is applied as {P.kubeletCpu === 'harvester' ? 'a per-node kubelet reserve, ' : ''}
+                  Overhead is applied as {P.kubeletCpu ? 'a per-node kubelet reserve, ' : ''}
                   per-node platform pods,
                   {/* Only claim a control-plane term when this platform has one:
                       vSphere, AHV and Proxmox model neither scope. */}
@@ -2922,7 +3008,7 @@
                       : null}
                   {' '}per-VM hypervisor overhead, per-device passthrough and a storage reserve. Figures are
                   scheduler <strong className="text-gray-400">requests</strong> — what blocks VM placement
-                  {P.kubeletCpu === 'harvester' ? ' — plus the kubelet reserve. ' : '. '}
+                  {P.kubeletCpu ? ' — plus the kubelet reserve. ' : '. '}
                   Your <strong className="text-gray-400">overcommit ratios are never
                   changed</strong> by this selection; where a platform conflicts with them (Nutanix AHV cannot
                   overcommit memory) it is reported as a design-rule check instead. Per-host
@@ -2969,6 +3055,13 @@
                         <div className="text-[11px] text-gray-500 bg-suse-bg border border-suse-border rounded p-2 font-mono">
                           Kubelet reserve = 2 × (GKE tiers + 400m for maxPods&gt;110) — not editable, it is a
                           published formula. 16 cores → 408m + 612m = 1020m. <TierBadge tier="verified" src={OVERHEAD_SRC.hvCpuPin} />
+                        </div>
+                      )}
+                      {P.kubeletCpu === 'openshift' && (
+                        <div className="text-[11px] text-gray-500 bg-suse-bg border border-suse-border rounded p-2 font-mono">
+                          systemReserved = node auto-sizing script — not editable, it is what the node writes at
+                          boot. CPU 60m + 12m per extra thread (min 500m); RAM 1 GiB + 6% of the next 120 GB +
+                          2% above 128 GB. <TierBadge tier="verified" src={OVERHEAD_SRC.ocpAutoSize} />
                         </div>
                       )}
                       <div className="grid sm:grid-cols-2 gap-3">

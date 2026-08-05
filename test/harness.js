@@ -37,6 +37,9 @@ const ohSrc        = block(/^\s*const OVERHEAD_SRC = \{/,                   /^\s
 const maxPods      = line1(/^\s*const HARVESTER_MAX_PODS =/);
 const gkeFn        = block(/^\s*const gkeReservedCpu = /,                   /^\s{6}\};\s*$/) || '';
 const hvKubelet    = line1(/^\s*const harvesterKubeletCpu = /);
+// OpenShift's node auto-sizing reserve (added with the OCP-V control-plane split).
+const ocpCpuFn     = block(/^\s*const openshiftReservedCpu = /,             /^\s{6}\};\s*$/) || '';
+const ocpRamFn     = block(/^\s*const openshiftReservedRam = /,             /^\s{6}\};\s*$/) || '';
 const hypervisors  = block(/^\s*const HYPERVISORS = \{/,                    /^\s{6}\};\s*$/) || '';
 const hvKey        = block(/^\s*const hypervisorKey = /, /'none';\s*$/) || '';
 const schemaFn     = block(/^\s*const overrideSchema = \(P\) => \{/,      /^\s{6}\};\s*$/) || '';
@@ -59,6 +62,8 @@ ${vcsaFn}
 ${maxPods}
 ${gkeFn}
 ${hvKubelet}
+${ocpCpuFn}
+${ocpRamFn}
 ${hypervisors}
 ${hvKey}
 ${schemaFn}
@@ -70,6 +75,8 @@ ${vsBody}
 module.exports = { virtSummary,
   gkeReservedCpu:      typeof gkeReservedCpu      !== 'undefined' ? gkeReservedCpu      : null,
   harvesterKubeletCpu: typeof harvesterKubeletCpu !== 'undefined' ? harvesterKubeletCpu : null,
+  openshiftReservedCpu: typeof openshiftReservedCpu !== 'undefined' ? openshiftReservedCpu : null,
+  openshiftReservedRam: typeof openshiftReservedRam !== 'undefined' ? openshiftReservedRam : null,
   computePlatformOverhead: typeof computePlatformOverhead !== 'undefined' ? computePlatformOverhead : null,
   HYPERVISORS:         typeof HYPERVISORS         !== 'undefined' ? HYPERVISORS         : null,
   overrideSchema:      typeof overrideSchema      !== 'undefined' ? overrideSchema      : null };
