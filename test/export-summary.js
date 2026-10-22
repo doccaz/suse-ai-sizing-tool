@@ -54,6 +54,11 @@ for (const mode of ['auto', 'pool', 'autoExtStor']) {
      v.faultTolerance === virt.ft && v.replication === virt.repl && v.sites === virt.sites);
   is('every design-rule check carried as {label, ok}', v.checks.length === virt.checks.length && v.checks.every(c => typeof c.label === 'string' && typeof c.ok === 'boolean'));
   is('no NaN / undefined / Infinity anywhere', !/NaN|undefined|Infinity/.test(JSON.stringify(s)) && !JSON.stringify(s, (k, x) => (typeof x === 'number' && !isFinite(x)) ? 'BAD' : x).includes('BAD'));
+  const vd = v.vmDemand;
+  is('vmDemand carried from virtSummary', vd.vms === virt.agg.vms && vd.vcpu === virt.agg.cpu && vd.ram === virt.agg.ram && vd.storage === virt.agg.storage && vd.gpuVms === virt.agg.gpuVms);
+  is('vmDemand splits node VMs from custom VMs (3+2+3 nodes in the fixture fleet)', vd.nodeVms === 8 && vd.customVms === virt.agg.vms - 8 && vd.customVms >= 0);
+  is('vmDemand physical demand and overcommit match virtSummary', vd.physical.threads === virt.demand.cpu && vd.physical.ram === virt.demand.ram && vd.physical.storage === virt.demand.storage && vd.overcommit.vcpu === virt.vcpuRatio && vd.overcommit.ram === virt.ramRatio);
+  is('vmDemand largest VM carried', vd.largest.vcpu === virt.agg.maxCpu && vd.largest.ram === virt.agg.maxRam);
   is('JSON round trip is lossless', JSON.stringify(JSON.parse(JSON.stringify(s))) === JSON.stringify(s));
 }
 

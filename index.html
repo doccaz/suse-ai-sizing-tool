@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.14.0";
+      const APP_VERSION = "2.15.0";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -3654,6 +3654,7 @@
          only ever ADD fields, bump it if one is renamed or removed. */
       const EXPORT_SUMMARY_SCHEMA = 1;
       function buildExportSummary(fleet, virt) {
+        const nodeVms = fleet.counts.controlPlane + fleet.counts.gpuWorkerNodes + fleet.counts.generalWorkerNodes;
         const res = (r) => ({ cpu: r.cpu, ram: r.ram, storage: r.storage, gpu: r.gpu });
         return {
           schema: EXPORT_SUMMARY_SCHEMA,
@@ -3680,6 +3681,18 @@
             externalStorageNeeded: virt.externalStorageNeeded,
             faultTolerance: virt.ft, replication: virt.repl,
             checks: virt.checks.map(c => ({ label: c.label, ok: !!c.ok })),
+            /* What the hosts have to carry (added v2.15, additive — schema stays 1).
+               nodeVms are the Kubernetes nodes of every enabled cluster, customVms the
+               hand-entered ones; `physical` is demand after overcommit and platform
+               overhead, in host units (threads / GB), with storage × replication. */
+            vmDemand: {
+              vms: virt.agg.vms,
+              nodeVms: nodeVms, customVms: Math.max(0, virt.agg.vms - nodeVms),
+              vcpu: virt.agg.cpu, ram: virt.agg.ram, storage: virt.agg.storage, gpu: virt.agg.gpu, gpuVms: virt.agg.gpuVms,
+              largest: { vcpu: virt.agg.maxCpu, ram: virt.agg.maxRam, storage: virt.agg.maxStorage, gpu: virt.agg.maxGpu },
+              overcommit: { vcpu: virt.vcpuRatio, ram: virt.ramRatio },
+              physical: { threads: virt.demand.cpu, ram: virt.demand.ram, storage: virt.demand.storage, gpu: virt.demand.gpu },
+            },
           },
         };
       }
