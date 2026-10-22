@@ -74,7 +74,7 @@
          EDIT THESE TWO CONSTANTS FOR YOUR OWN DEPLOYMENT
       ========================================================= */
       const GITHUB_URL = "https://github.com/doccaz/suse-ai-sizing-tool";
-      const APP_VERSION = "2.13.0";
+      const APP_VERSION = "2.14.0";
       /* ======================================================= */
 
       const { useState, useMemo, useEffect, useRef } = React;
@@ -1891,7 +1891,8 @@
           } catch (e) { showToast("Could not create link"); }
         };
         const downloadJson = () => {
-          const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+          const out = { ...state, summary: buildExportSummary(fleet, virtSummary) };
+          const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
           triggerDownload(blob, 'suse-ai-sizing-config.json');
           showToast("Configuration exported");
         };
@@ -1899,7 +1900,7 @@
           const file = e.target.files[0]; if (!file) return;
           const reader = new FileReader();
           reader.onload = (ev) => {
-            try { const parsed = JSON.parse(ev.target.result); if (isValidConfig(parsed)) { setState(migrateState(parsed)); showToast("Configuration imported"); } else showToast("Invalid config file"); }
+            try { const { summary: _derived, ...parsed } = JSON.parse(ev.target.result); if (isValidConfig(parsed)) { setState(migrateState(parsed)); showToast("Configuration imported"); } else showToast("Invalid config file"); }
             catch (err) { showToast("Could not parse file"); }
           };
           reader.readAsText(file); e.target.value = '';
@@ -3642,6 +3643,45 @@
       // pre-2.3 single-cluster shape (base + services), which migrateState upgrades.
       function isValidConfig(parsed) {
         return !!parsed && (Array.isArray(parsed.clusters) || (parsed.base && parsed.services));
+      }
+
+      /* Results block added to the exported JSON FILE only (v2.14). It is derived at
+         export time from `fleet` and `virtSummary`, never stored in `state`, in
+         localStorage or in the #cfg= share link, and it is dropped again on import —
+         so it cannot go stale and it changes no calculation. External tools (the
+         SUSE PoC Planner) read it instead of re-implementing the sizing maths.
+         `schema` is versioned independently of the app and of the state shape;
+         only ever ADD fields, bump it if one is renamed or removed. */
+      const EXPORT_SUMMARY_SCHEMA = 1;
+      function buildExportSummary(fleet, virt) {
+        const res = (r) => ({ cpu: r.cpu, ram: r.ram, storage: r.storage, gpu: r.gpu });
+        return {
+          schema: EXPORT_SUMMARY_SCHEMA,
+          tool: 'suse-ai-sizing',
+          toolVersion: APP_VERSION,
+          generatedAt: new Date().toISOString(),
+          units: { cpu: 'vCPU', ram: 'GB', storage: 'GB', gpu: 'devices' },
+          ai: {
+            clusterCount: fleet.clusterCount,
+            capacity: res(fleet.capacity), demand: res(fleet.demand), deltas: res(fleet.deltas),
+            counts: { ...fleet.counts },
+            clusters: fleet.per.map(({ cluster, summary }) => ({
+              name: cluster.name, role: cluster.role,
+              capacity: res(summary.capacity), demand: res(summary.demand), counts: { ...summary.counts },
+            })),
+            services: fleet.serviceDetails.map(d => ({
+              name: d.name, profile: d.profile, cpu: d.cpu, ram: d.ram, storage: d.storage, gpu: d.gpu || 0,
+            })),
+          },
+          virtualization: {
+            mode: virt.mode, platform: virt.platform, sites: virt.sites,
+            hostsPerSite: virt.totals.perSiteHosts, hostsTotal: virt.totals.totalHosts,
+            totals: { cores: virt.totals.cores, threads: virt.totals.threads, ram: virt.totals.ram, storage: virt.totals.storage, gpus: virt.totals.gpus },
+            externalStorageNeeded: virt.externalStorageNeeded,
+            faultTolerance: virt.ft, replication: virt.repl,
+            checks: virt.checks.map(c => ({ label: c.label, ok: !!c.ok })),
+          },
+        };
       }
 
       function loadInitialState(defaultFn) {
