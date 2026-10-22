@@ -13,7 +13,7 @@ cd "$(dirname "$0")"
 
 SUITES=("$@")
 if [ ${#SUITES[@]} -eq 0 ]; then
-  SUITES=(compile checks benchmark e2e migrate docs capture regression browser pdf import-old)
+  SUITES=(compile checks benchmark e2e migrate docs capture regression export-summary browser pdf import-old)
 fi
 
 fails=0
