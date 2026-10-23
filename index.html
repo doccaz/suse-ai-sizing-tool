@@ -3810,13 +3810,28 @@
           doc.text(text, margin, y);
           return y + 6;
         };
+        const num = { halign: 'right' };
+        const rightCols = (...idx) => idx.reduce((o, i) => { o[i] = num; return o; }, {});
+        /* Small tables are kept whole (autoTable moves them to the next page
+           rather than splitting a few rows across a break). */
+        const KEEP = { pageBreak: 'avoid' };
         const table = (opts) => {
+          const own = opts.didParseCell;
           doc.autoTable(Object.assign({
             theme: 'grid',
             headStyles: { fillColor: GREEN, textColor: 255, fontStyle: 'bold' },
             styles: { font: 'helvetica', fontSize: 8, cellPadding: 1.6 },
             margin: { left: margin, right: margin, top: CONTENT_TOP, bottom: CONTENT_BOTTOM },
-          }, opts));
+            rowPageBreak: 'avoid',          // never split one row across a page break
+          }, opts, {
+            // Head and foot cells follow their column's alignment, so a right-aligned
+            // number column does not sit under a left-aligned heading.
+            didParseCell: (d) => {
+              const col = opts.columnStyles && opts.columnStyles[d.column.index];
+              if (d.section !== 'body' && col && col.halign && !(d.cell.colSpan > 1)) d.cell.styles.halign = col.halign;
+              if (own) own(d);
+            },
+          }));
           return doc.lastAutoTable.finalY;
         };
 
@@ -3831,7 +3846,7 @@
             ['Storage (GB)', fmt(summary.capacity.storage), fmt(summary.demand.storage), signed(summary.deltas.storage)],
             ['GPU',          fmt(summary.capacity.gpu),     fmt(summary.demand.gpu),     signed(summary.deltas.gpu)],
           ],
-          columnStyles: { 0: { fontStyle: 'bold' } },
+          columnStyles: Object.assign({ 0: { fontStyle: 'bold' } }, rightCols(1, 2, 3)),
           didParseCell: (d) => {
             if (d.section === 'body' && d.column.index === 3) {
               d.cell.styles.textColor = String(d.cell.raw).startsWith('-') ? [200, 40, 40] : [22, 140, 90];
@@ -3853,6 +3868,7 @@
             summary.counts.controlPlane, summary.counts.gpuWorkerNodes, summary.counts.generalWorkerNodes,
             fmt(summary.capacity.cpu), fmt(summary.capacity.ram), fmt(summary.capacity.storage), summary.capacity.gpu]],
           footStyles: { fillColor: DARK, textColor: 255, fontStyle: 'bold' },
+          columnStyles: rightCols(2, 3, 4, 5, 6, 7, 8),
         });
 
         /* ---- Architecture diagram (the one intentionally-raster section) ---- */
@@ -3880,14 +3896,18 @@
             startY: y + 5,
             head: [['Port(s)', 'Service', 'Source', 'Destination']],
             body: rule.ports.map(p => [p.port, p.service, p.source, p.destination]),
+            pageBreak: 'avoid',
           }) + 9;
         });
 
         /* ---- Virtualization (bare-metal host) sizing ---- */
         if (virt && virt.agg && virt.agg.vms > 0) {
-          doc.addPage('a4', 'p');
           const ext = virt.ext;
-          let vy = sectionTitle('SUSE Virtualization (Bare-Metal) Sizing', CONTENT_TOP);
+          // Continue below the network rules when there is room for the heading
+          // and the first tables; otherwise start a fresh page.
+          let vy;
+          if (y + 70 > pageH() - CONTENT_BOTTOM) { doc.addPage('a4', 'p'); y = CONTENT_TOP; }
+          vy = sectionTitle('SUSE Virtualization (Bare-Metal) Sizing', y);
           doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(MUTE);
           const oh = virt.overhead || { lines: [] };
           const pdfHv = HYPERVISORS[hypervisorKey(virt.platform)];
@@ -3905,7 +3925,8 @@
             + (addonNames.length ? `\nAdd-ons counted: ${addonNames.join(', ')}` : ''), pageW() - margin * 2);
           doc.text(intro, margin, vy); vy += intro.length * 4 + 3;
 
-          vy = table({ startY: vy,
+          vy = table({ startY: vy, pageBreak: 'avoid',
+            columnStyles: rightCols(1, 3, 4, 5, 6),
             head: [['Host type', 'Qty', 'Sockets×cores×thr', 'Sched. threads', 'Usable RAM', 'Storage', 'GPU']],
             body: virtCfg.hosts.map(h => { const c = virt.hostCaps.find(x => x.id === h.id) || {}; return [
               h.name + (h.primary && virt.mode === 'auto' ? ' (block)' : ''),
@@ -3915,7 +3936,8 @@
               ext ? '—' : `${fmt(h.storage || 0)} GB`, String(h.gpus),
             ]; }) }) + 6;
 
-          vy = table({ startY: vy, styles: { font: 'helvetica', fontSize: 9, cellPadding: 1.6 },
+          vy = table({ startY: vy, pageBreak: 'avoid', styles: { font: 'helvetica', fontSize: 9, cellPadding: 1.6 },
+            columnStyles: { 0: { cellWidth: 50, fontStyle: 'bold' } },
             head: [['Aggregated VM fleet', 'Value']],
             body: [
               ['Total VMs', `${virt.agg.vms} (${virt.agg.gpuVms} GPU-pinned)`],
@@ -4020,7 +4042,8 @@
             doc.text(prov, margin, vy); vy += prov.length * 3 + 5;
 
             if (virt.overheadScenarios && virt.overheadScenarios.length) {
-              vy = table({ startY: vy, styles: { font: 'helvetica', fontSize: 8, cellPadding: 1.5 },
+              vy = table({ startY: vy, pageBreak: 'avoid', styles: { font: 'helvetica', fontSize: 8, cellPadding: 1.5 },
+                columnStyles: rightCols(1, 2, 3),
                 head: [['Overhead by cluster size', 'CPU (threads)', 'RAM (GB)', 'Disk (GB)']],
                 body: virt.overheadScenarios.map(r => [
                   // ASCII only: jsPDF's standard fonts are WinAnsi-encoded, and a
@@ -4056,12 +4079,14 @@
                 [ext ? 'External usable storage' : 'Total raw local storage', `${fmt(ext ? virt.externalStorageNeeded : virt.totals.storage)} GB`],
                 ['Total GPUs', String(virt.totals.gpus)],
               ];
-          vy = table({ startY: vy, styles: { font: 'helvetica', fontSize: 9, cellPadding: 1.6 },
+          vy = table({ startY: vy, pageBreak: 'avoid', styles: { font: 'helvetica', fontSize: 9, cellPadding: 1.6 },
+            columnStyles: { 0: { cellWidth: 50, fontStyle: 'bold' } },
             headStyles: { fillColor: DARK, textColor: 255, fontStyle: 'bold' },
             head: [['Host sizing result', 'Value']], body: resultBody }) + 6;
 
-          vy = table({ startY: vy, theme: 'plain', styles: { font: 'helvetica', fontSize: 9, cellPadding: 1.6 },
-            head: [['Design rule checks', '']], headStyles: { fillColor: GREEN, textColor: 255, fontStyle: 'bold' },
+          vy = table({ startY: vy, theme: 'plain', pageBreak: 'avoid', styles: { font: 'helvetica', fontSize: 9, cellPadding: 1.6 },
+            columnStyles: { 0: { cellWidth: 14 } },
+            head: [[{ content: 'Design rule checks', colSpan: 2 }]], headStyles: { fillColor: GREEN, textColor: 255, fontStyle: 'bold' },
             body: virt.checks.map(c => [c.ok ? 'PASS' : 'FAIL', c.label]),
             didParseCell: (d) => { if (d.section === 'body' && d.column.index === 0) { d.cell.styles.textColor = d.cell.raw === 'PASS' ? [22,140,90] : [200,40,40]; d.cell.styles.fontStyle = 'bold'; } } }) + 6;
 
